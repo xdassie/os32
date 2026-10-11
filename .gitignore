@@ -1,0 +1,15 @@
+/target
+# Build artifacts
+/boot/
+/iso_root/
+
+# Generated binaries and disk images
+os32.bin
+os32.iso
+
+# Local Docker configuration
+.dockerignore
+
+# Generated or local configuration
+grub.cfg
+
