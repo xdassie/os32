@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     grub-pc-bin \
     grub-common \
     mtools \
+    xorriso \
+    syslinux \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

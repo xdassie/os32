@@ -13,3 +13,6 @@ os32.iso
 # Generated or local configuration
 grub.cfg
 
+build/boot.elf
+build/boot.o
+.gitignore
