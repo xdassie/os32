@@ -4,6 +4,7 @@
 section .text align=4
 global _start
 global mb_header
+extern rust_kernel_entry
 
 ; Multiboot header - must be at the very beginning of the loaded image
 mb_header:
@@ -111,6 +112,10 @@ _start:
     mov word [ball_x], 0    ; Reset ball position
     mov word [ball_y], 12   ; Start in middle vertically
     mov word [ball_dx], 1   ; Move right initially
+    
+    ; Call Rust kernel entry point (after splashscreen setup)
+    call rust_kernel_entry
+    
     jmp .animation_loop
 
 .animation_loop:

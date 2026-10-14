@@ -16,3 +16,6 @@ grub.cfg
 build/boot.elf
 build/boot.o
 .gitignore
+src/target/
+os32.elf
+build/kernel.rlib

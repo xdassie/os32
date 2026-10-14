@@ -20,6 +20,12 @@ SECTIONS
         *(.bss .bss.*)
     }
 
+    /* Rust sections */
+    .text.rust : {
+        *(.text.rust*)
+        *(.rodata.rust*)
+    }
+
     /DISCARD/ : {
         *(.eh_frame)
         *(.eh_frame_hdr)
