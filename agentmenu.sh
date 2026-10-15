@@ -11,14 +11,14 @@ echo "=== Building kernel ==="
 docker run --network=host --rm -v "$SCRIPT_DIR":/app -w /app os32-builder:latest bash -c '
     source $HOME/.cargo/env
     # Build Rust kernel module with custom target
-    cd src && cargo -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem \
+    cd src && cargo -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
         -Zunstable-options -Zjson-target-spec \
         build --target ../targets/i686-unknown-none.json --release && \
-    cp target/i686-unknown-none/release/libkernel.rlib ../build/kernel.rlib && \
+    cp target/i686-unknown-none/release/libkernel.a ../build/kernel.a && \
     cd .. && \
     echo "Rust module compiled successfully"
     nasm -f elf32 build/boot.asm -o build/boot.o
-    ld.lld -m elf_i386 -T build/linker.ld build/boot.o build/kernel.rlib -o build/boot.elf
+    ld.lld -m elf_i386 -T build/linker.ld build/boot.o build/kernel.a -o build/boot.elf
 '
 
 cp build/boot.elf os32.elf

@@ -4,5 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["rlib"]
+crate-type = ["staticlib"]
 path = "kernel.rs"
+
+[dependencies]
+uart_16550 = { version = "0.8", default-features = false }
