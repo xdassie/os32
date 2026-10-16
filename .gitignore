@@ -19,3 +19,4 @@ build/boot.o
 src/target/
 os32.elf
 build/kernel.rlib
+build/kernel.a

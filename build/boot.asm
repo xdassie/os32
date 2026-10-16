@@ -60,9 +60,8 @@ _start:
     mov word [ball_x], 0    ; Reset ball position
     mov word [ball_y], 12   ; Start in middle vertically
     mov word [ball_dx], 1   ; Move right initially
-    
-    ; Call Rust kernel entry point (after splashscreen setup)
-    call rust_kernel_entry
+    ; run splash loop ebp number of times
+    mov ebp, 500
     
     jmp .animation_loop
 
@@ -112,12 +111,16 @@ _start:
     mov word [edi], 0x0FB0        ; '░' with white attribute
 
     ; Delay (simple busy loop for animation speed)
-    mov ecx, 50000
+    mov ecx, 5000000
 .delay_loop:
     dec ecx
     jnz .delay_loop
-
+    dec ebp
+    jz .kernel
     jmp .animation_loop
+.kernel:
+    ; Call Rust kernel entry point (after splashscreen setup)
+    call rust_kernel_entry
 
 section .data align=4
 msg: db "OS32 booted successfully!", 0

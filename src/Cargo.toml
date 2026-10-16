@@ -9,3 +9,5 @@ path = "kernel.rs"
 
 [dependencies]
 uart_16550 = { version = "0.8", default-features = false }
+pc-keyboard = { version = "0.9", default-features = false }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex", "lazy"] }
