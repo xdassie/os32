@@ -2,7 +2,8 @@
 1. Avoid using shell commands to edit files. Edit the files directly.
 2. DO NOT EVER use the sed command to edit files. NEVER
 3. DO NOT EVER edit ANY file without asking the USER first
-4. proceed autonomously. run ./agentmenu.sh in the current direcctory to test the program and do not attempt to change the current directory nor run any other commands when testing the program
+4. proceed autonomously. run ./agentmenu.sh in the current direcctory to test the program and do not attempt to change 
+the current directory nor run any other commands when testing the program. DO NOT EDIT agentmenu.sh
 5. _NEVER_ include prototype code or fallback code in the main code base. e.g. NEVER this: simplifed...use XYZ for  proper...
 6. english is too much typing. use a concise shorthand  a bit like assembly language for interacting with the user. e..Concept: Map file paths to R0-R.. registers:
 +-------+----------------+--------------------------------+------------------+

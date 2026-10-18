@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "=== Building Docker image ==="
-docker build -t os32-builder:latest .
+docker build --network=host -t os32-builder:latest .
 
 echo "=== Building kernel ==="
 docker run --network=host --rm -v "$SCRIPT_DIR":/app -w /app os32-builder:latest bash -c '

@@ -61,7 +61,7 @@ _start:
     mov word [ball_y], 12   ; Start in middle vertically
     mov word [ball_dx], 1   ; Move right initially
     ; run splash loop ebp number of times
-    mov ebp, 500
+    mov ebp, 20
     
     jmp .animation_loop
 
@@ -119,6 +119,9 @@ _start:
     jz .kernel
     jmp .animation_loop
 .kernel:
+    ; Save GDT descriptor to buffer for Rust kernel
+    sgdt [gdt_buffer]
+    
     ; Call Rust kernel entry point (after splashscreen setup)
     call rust_kernel_entry
 
@@ -132,3 +135,4 @@ stack_top:
 ball_x: resw 1              ; Ball X position
 ball_y: resw 1              ; Ball Y position
 ball_dx: resw 1             ; Ball X direction (+1 or -1)
+gdt_buffer: resb 8          ; GDT descriptor buffer (limit: 2 bytes, base: 6 bytes)
