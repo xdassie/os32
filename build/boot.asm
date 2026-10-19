@@ -8,6 +8,25 @@ extern rust_kernel_entry
 
 %define VGA_ATTR 0x0F
 
+%macro PRINTREGS 0
+    ; 32-bit general purpose registers (not EIP)
+    VGA_PRINT_REG32 eax, 0
+    VGA_PRINT_REG32 ebx, 160
+    VGA_PRINT_REG32 ecx, 320
+    VGA_PRINT_REG32 edx, 480
+    VGA_PRINT_REG32 esi, 640
+    VGA_PRINT_REG32 edi, 800
+    VGA_PRINT_REG32 ebp, 960
+    VGA_PRINT_REG32 esp, 1120
+    ; 16-bit segment registers
+    VGA_PRINT_REG16 cs, 1280
+    VGA_PRINT_REG16 ds, 1440
+    VGA_PRINT_REG16 es, 1600
+    VGA_PRINT_REG16 fs, 1760
+    VGA_PRINT_REG16 gs, 1920
+    VGA_PRINT_REG16 ss, 2080
+%endmacro
+
 %macro VGA_PRINT_REG16 2
     ; %1 = 16-bit register
     ; %2 = byte offset into VGA memory
@@ -213,12 +232,9 @@ _start:
     sgdt [gdt_buffer]
         
     ; Call Rust kernel entry point (after splashscreen setup)
-    VGA_PRINT_REG32 eax, 0
-    VGA_PRINT_REG32 ebx, 160
-    VGA_PRINT_REG32 ecx, 320
-    VGA_PRINT_REG32 edx, 480
+    PRINTREGS
     call rust_kernel_entry
-    VGA_PRINT_REG16 ss, 640
+    PRINTREGS
     hlt
 
 ; Label stubs for register name push (called by macros)
@@ -234,16 +250,54 @@ _start:
 .pushreglabel_edx:
     mov esi, reg_edx
     ret
+.pushreglabel_esi:
+    mov esi, reg_esi
+    ret
+.pushreglabel_edi:
+    mov esi, reg_edi
+    ret
+.pushreglabel_ebp:
+    mov esi, reg_ebp
+    ret
+.pushreglabel_esp:
+    mov esi, reg_esp
+    ret
+.pushreglabel_cs:
+    mov esi, reg_cs
+    ret
+.pushreglabel_ds:
+    mov esi, reg_ds
+    ret
+.pushreglabel_es:
+    mov esi, reg_es
+    ret
+.pushreglabel_fs:
+    mov esi, reg_fs
+    ret
+.pushreglabel_gs:
+    mov esi, reg_gs
+    ret
 .pushreglabel_ss:
     mov esi, reg_ss
     ret
 
 section .data align=4
 msg: db "OS32 booted successfully!", 0
+; 32-bit register labels
 reg_eax: db "eax:", 0
 reg_ebx: db "ebx:", 0
 reg_ecx: db "ecx:", 0
 reg_edx: db "edx:", 0
+reg_esi: db "esi:", 0
+reg_edi: db "edi:", 0
+reg_ebp: db "ebp:", 0
+reg_esp: db "esp:", 0
+; 16-bit segment register labels
+reg_cs:  db "cs:", 0
+reg_ds:  db "ds:", 0
+reg_es:  db "es:", 0
+reg_fs:  db "fs:", 0
+reg_gs:  db "gs:", 0
 reg_ss:  db "ss:", 0
 
 section .bss align=4096
