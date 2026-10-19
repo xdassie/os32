@@ -17,7 +17,7 @@ docker run --network=host --rm -v "$SCRIPT_DIR":/app -w /app os32-builder:latest
     cp target/i686-unknown-none/release/libkernel.a ../build/kernel.a && \
     cd .. && \
     echo "Rust module compiled successfully"
-    nasm -f elf32 build/boot.asm -o build/boot.o
+    nasm -g -f elf32 build/boot.asm -o build/boot.o
     ld.lld -m elf_i386 -T build/linker.ld build/boot.o build/kernel.a -o build/boot.elf
 '
 

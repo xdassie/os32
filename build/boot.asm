@@ -13,8 +13,21 @@ extern rust_kernel_entry
     ; %2 = byte offset into VGA memory
     pushad
 
+    ; Print register label (3 chars + colon)
     mov edi, 0xB8000
     add edi, %2
+    call .pushreglabel_%1	; esi is expected to contain the address of the string label
+    mov ecx, 4
+%%printlabel16:
+    mov al, [esi]
+    mov ah, VGA_ATTR
+    stosw
+    inc esi
+    dec ecx
+    jnz %%printlabel16
+
+    ; Print hex value (4 digits)
+    add edi, 8
     mov ebx, 4
     mov ax, %1
     mov cx, ax
@@ -53,8 +66,21 @@ extern rust_kernel_entry
     ; %2 = byte offset into VGA memory
     pushad
 
+    ; Print register label (4 chars + colon)
     mov edi, 0xB8000
     add edi, %2
+    call .pushreglabel_%1		; esi is expected to contain the address of the string label
+    mov ecx, 5
+%%printlabel32:
+    mov al, [esi]
+    mov ah, VGA_ATTR
+    stosw
+    inc esi
+    dec ecx
+    jnz %%printlabel32
+
+    ; Print hex value (8 digits)
+    add edi, 10
     mov ebx, 8
     mov esi, %1
 
@@ -195,9 +221,30 @@ _start:
     VGA_PRINT_REG16 ss, 640
     hlt
 
+; Label stubs for register name push (called by macros)
+.pushreglabel_eax:
+    mov esi, reg_eax
+    ret
+.pushreglabel_ebx:
+    mov esi, reg_ebx
+    ret
+.pushreglabel_ecx:
+    mov esi, reg_ecx
+    ret
+.pushreglabel_edx:
+    mov esi, reg_edx
+    ret
+.pushreglabel_ss:
+    mov esi, reg_ss
+    ret
 
 section .data align=4
 msg: db "OS32 booted successfully!", 0
+reg_eax: db "eax:", 0
+reg_ebx: db "ebx:", 0
+reg_ecx: db "ecx:", 0
+reg_edx: db "edx:", 0
+reg_ss:  db "ss:", 0
 
 section .bss align=4096
 stack_bottom:
