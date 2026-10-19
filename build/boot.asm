@@ -6,26 +6,84 @@ global _start
 global mb_header
 extern rust_kernel_entry
 
+%define VGA_ATTR 0x0F
+
 %macro VGA_PRINT_REG16 2
-; %1 = register name
-; %2 = offset into VGA memory
-    pusha
-    push %1
-    pop eax
-    mov edi,0xB8000
-    mov [edi + %2],ax
-    popa
+    ; %1 = 16-bit register
+    ; %2 = byte offset into VGA memory
+    pushad
+
+    mov edi, 0xB8000
+    add edi, %2
+    mov ebx, 4
+    mov ax, %1
+    mov cx, ax
+
+%%digit16:
+    mov eax, ebx
+    dec eax
+    shl eax, 2
+    mov cl, al
+
+    movzx edx, cx
+    shr edx, cl
+    and edx, 0x0F
+
+    cmp edx, 9
+    jbe %%numeric16
+    add dl, 'A' - 10
+    jmp %%write16
+
+%%numeric16:
+    add dl, '0'
+
+%%write16:
+    mov ah, VGA_ATTR
+    mov al, dl
+    stosw
+    dec ebx
+    jnz %%digit16
+
+    popad
 %endmacro
 
+
 %macro VGA_PRINT_REG32 2
-; %1 = register name
-; %2 = offset into VGA memory
-    pusha
-    push %1
-    pop eax
-    mov edi,0xB8000
-    mov [edi + %2],eax
-    popa
+    ; %1 = 32-bit register
+    ; %2 = byte offset into VGA memory
+    pushad
+
+    mov edi, 0xB8000
+    add edi, %2
+    mov ebx, 8
+    mov esi, %1
+
+%%digit32:
+    mov eax, ebx
+    dec eax
+    shl eax, 2
+    mov cl, al
+
+    mov edx, esi
+    shr edx, cl
+    and edx, 0x0F
+
+    cmp edx, 9
+    jbe %%numeric32
+    add dl, 'A' - 10
+    jmp %%write32
+
+%%numeric32:
+    add dl, '0'
+
+%%write32:
+    mov ah, VGA_ATTR
+    mov al, dl
+    stosw
+    dec ebx
+    jnz %%digit32
+
+    popad
 %endmacro
 
 ; Multiboot header - must be at the very beginning of the loaded image
