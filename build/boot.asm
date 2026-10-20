@@ -1,15 +1,73 @@
+
 ; OS32 - Pure Assembly 32-bit Kernel
-; Multiboot compatible kernel for GRUB
+; Multiboot-compatible kernel for GRUB
+; Assumes GRUB enters in 32-bit protected mode.
+
+BITS 32
 
 section .text align=4
 global _start
 global mb_header
 extern rust_kernel_entry
 
-%define VGA_ATTR 0x0F
+%define VGA_ATTR       0x0F
+%define KERNEL_CS      0x08
+%define KERNEL_DS      0x10
+%define IDT_ENTRIES    32
+%define VGA_MEMORY     0xB8000
+
+; ------------------------------------------------------------
+; Register-label helpers
+; ------------------------------------------------------------
+
+pushreglabel_eax:
+    mov esi, reg_eax
+    ret
+pushreglabel_ebx:
+    mov esi, reg_ebx
+    ret
+pushreglabel_ecx:
+    mov esi, reg_ecx
+    ret
+pushreglabel_edx:
+    mov esi, reg_edx
+    ret
+pushreglabel_esi:
+    mov esi, reg_esi
+    ret
+pushreglabel_edi:
+    mov esi, reg_edi
+    ret
+pushreglabel_ebp:
+    mov esi, reg_ebp
+    ret
+pushreglabel_esp:
+    mov esi, reg_esp
+    ret
+pushreglabel_cs:
+    mov esi, reg_cs
+    ret
+pushreglabel_ds:
+    mov esi, reg_ds
+    ret
+pushreglabel_es:
+    mov esi, reg_es
+    ret
+pushreglabel_fs:
+    mov esi, reg_fs
+    ret
+pushreglabel_gs:
+    mov esi, reg_gs
+    ret
+pushreglabel_ss:
+    mov esi, reg_ss
+    ret
+
+; ------------------------------------------------------------
+; Register-printing macros
+; ------------------------------------------------------------
 
 %macro PRINTREGS 0
-    ; 32-bit general purpose registers (not EIP)
     VGA_PRINT_REG32 eax, 0
     VGA_PRINT_REG32 ebx, 160
     VGA_PRINT_REG32 ecx, 320
@@ -18,7 +76,7 @@ extern rust_kernel_entry
     VGA_PRINT_REG32 edi, 800
     VGA_PRINT_REG32 ebp, 960
     VGA_PRINT_REG32 esp, 1120
-    ; 16-bit segment registers
+
     VGA_PRINT_REG16 cs, 1280
     VGA_PRINT_REG16 ds, 1440
     VGA_PRINT_REG16 es, 1600
@@ -28,262 +86,360 @@ extern rust_kernel_entry
 %endmacro
 
 %macro VGA_PRINT_REG16 2
-    ; %1 = 16-bit register
-    ; %2 = byte offset into VGA memory
     pushad
 
-    ; Print register label (3 chars + colon)
-    mov edi, 0xB8000
+    mov edi, VGA_MEMORY
     add edi, %2
-    call .pushreglabel_%1	; esi is expected to contain the address of the string label
+
+    call pushreglabel_%1
     mov ecx, 4
-%%printlabel16:
+
+%%printlabel:
     mov al, [esi]
     mov ah, VGA_ATTR
     stosw
     inc esi
     dec ecx
-    jnz %%printlabel16
+    jnz %%printlabel
 
-    ; Print hex value (4 digits)
     add edi, 8
-    mov ebx, 4
+
+    ; Preserve the original 16-bit register value.
     mov ax, %1
-    mov cx, ax
+    movzx ebp, ax
 
-%%digit16:
-    mov eax, ebx
-    dec eax
-    shl eax, 2
-    mov cl, al
+    mov ebx, 4
 
-    movzx edx, cx
+%%digit:
+    mov ecx, ebx
+    dec ecx
+    shl ecx, 2
+
+    mov edx, ebp
     shr edx, cl
     and edx, 0x0F
 
     cmp edx, 9
-    jbe %%numeric16
+    jbe %%numeric
     add dl, 'A' - 10
-    jmp %%write16
+    jmp %%write
 
-%%numeric16:
+%%numeric:
     add dl, '0'
 
-%%write16:
-    mov ah, VGA_ATTR
+%%write:
     mov al, dl
+    mov ah, VGA_ATTR
     stosw
+
     dec ebx
-    jnz %%digit16
+    jnz %%digit
 
     popad
 %endmacro
-
 
 %macro VGA_PRINT_REG32 2
-    ; %1 = 32-bit register
-    ; %2 = byte offset into VGA memory
     pushad
 
-    ; Print register label (4 chars + colon)
-    mov edi, 0xB8000
+    mov edi, VGA_MEMORY
     add edi, %2
-    call .pushreglabel_%1		; esi is expected to contain the address of the string label
+
+    call pushreglabel_%1
     mov ecx, 5
-%%printlabel32:
+
+%%printlabel:
     mov al, [esi]
     mov ah, VGA_ATTR
     stosw
     inc esi
     dec ecx
-    jnz %%printlabel32
+    jnz %%printlabel
 
-    ; Print hex value (8 digits)
     add edi, 10
+
+    mov ebp, %1
     mov ebx, 8
-    mov esi, %1
 
-%%digit32:
-    mov eax, ebx
-    dec eax
-    shl eax, 2
-    mov cl, al
+%%digit:
+    mov ecx, ebx
+    dec ecx
+    shl ecx, 2
 
-    mov edx, esi
+    mov edx, ebp
     shr edx, cl
     and edx, 0x0F
 
     cmp edx, 9
-    jbe %%numeric32
+    jbe %%numeric
     add dl, 'A' - 10
-    jmp %%write32
+    jmp %%write
 
-%%numeric32:
+%%numeric:
     add dl, '0'
 
-%%write32:
-    mov ah, VGA_ATTR
+%%write:
     mov al, dl
+    mov ah, VGA_ATTR
     stosw
+
     dec ebx
-    jnz %%digit32
+    jnz %%digit
 
     popad
 %endmacro
 
-; Multiboot header - must be at the very beginning of the loaded image
-mb_header:
-    dd 0x1BADB002      ; Multiboot magic number
-    dd 0               ; Flags (0 = no flags, 32-bit)
-    dd -(0x1BADB002 + 0)  ; Checksum (must be 0 mod 2^32)
+; ------------------------------------------------------------
+; Multiboot v1 header
+; Keep this in the first 8 KiB of the loaded image.
+; ------------------------------------------------------------
 
-; Entry point - comes right after multiboot header
+align 4
+mb_header:
+    dd 0x1BADB002
+    dd 0
+    dd -(0x1BADB002)
+
+; ------------------------------------------------------------
+; Kernel entry
+; ------------------------------------------------------------
+
 align 4
 _start:
-    ; Set up stack (16KB stack at 1MB + 64KB = 0x110000, grow down)
+    cli
+
+    ; Establish a valid stack immediately.
     mov esp, stack_top
-    
-.animation:
-    ; Clear screen with welcome message at top
+    cld
+
+    ; Install our GDT before using our own selectors.
+    call setup_gdt
+
+    ; Install an IDT before enabling normal interrupts.
+    call setup_idt
+
+    ; Clear VGA text buffer.
+    mov edi, VGA_MEMORY
+    mov ecx, 2000
+    mov ax, 0x0720
+    rep stosw
+
+    ; Display boot message.
     mov esi, msg
-    mov edi, 0xB8000        ; VGA text buffer
-    xor ecx, ecx
-.print_vga_loop2:
-    mov al, [esi]
+    mov edi, VGA_MEMORY
+
+.print_message:
+    lodsb
     test al, al
-    jz .clear_rest
-    mov [edi + ecx], al
-    mov byte [edi + ecx + 1], 0x0F
-    add ecx, 2
-    inc esi
-    jmp .print_vga_loop2
+    jz .start_animation
 
-.clear_rest:
-    ; Clear rest of screen (80x25 = 2000 cells = 4000 bytes)
-    mov ecx, 4000
-    mov edi, 0xB8000
-    xor eax, eax
-    rep stosb
+    mov ah, VGA_ATTR
+    stosw
+    jmp .print_message
 
-    ; Start bouncing ball animation
-    mov word [ball_x], 0    ; Reset ball position
-    mov word [ball_y], 12   ; Start in middle vertically
-    mov word [ball_dx], 1   ; Move right initially
-    ; run splash loop ebp number of times
+.start_animation:
+    mov word [ball_x], 0
+    mov word [ball_y], 12
+    mov word [ball_dx], 1
+
     mov ebp, 20
-    
-    jmp .animation_loop
 
 .animation_loop:
-    ; Calculate ball position in VGA memory
-    ; cell_index = ball_y * 80 + ball_x
-    mov ax, [ball_y]
-    mov bx, 80
-    mul bx                  ; AX = ball_y * 80
-    add ax, [ball_x]        ; AX = cell index
-    mov bx, ax
-    mov ax, 2               ; 2 bytes per cell
-    mul bx                  ; AX = byte offset
-    mov edi, 0xB8000        ; Full 32-bit VGA address
-    add edi, eax            ; EDI = VGA address + offset
+    ; Erase the previous ball position.
+    movzx eax, word [ball_y]
+    imul eax, 80
+    movzx ebx, word [ball_x]
+    add eax, ebx
+    shl eax, 1
 
-    ; Clear old position (draw space with gray attribute)
-    mov word [edi], 0x0720        ; ' ' with gray attribute
+    mov edi, VGA_MEMORY
+    add edi, eax
+    mov word [edi], 0x0720
 
-    ; Update ball position
+    ; Update horizontal position.
     mov ax, [ball_x]
     add ax, [ball_dx]
-    cmp ax, 78              ; Right edge (80 cols - 2)
-    jl .check_left
+
+    cmp ax, 78
+    jle .check_left
+
     mov ax, 78
     mov word [ball_dx], -1
+
 .check_left:
     cmp ax, 0
     jge .store_x
-    mov ax, 0
+
+    xor ax, ax
     mov word [ball_dx], 1
+
 .store_x:
     mov [ball_x], ax
 
-    ; Calculate new ball position in VGA memory
-    mov ax, [ball_y]
-    mov bx, 80
-    mul bx
-    add ax, [ball_x]
-    mov bx, ax
-    mov ax, 2
-    mul bx
-    mov edi, 0xB8000        ; Full 32-bit VGA address
-    add edi, eax            ; EDI = VGA address + offset
+    ; Draw the ball at the new position.
+    movzx eax, word [ball_y]
+    imul eax, 80
+    movzx ebx, word [ball_x]
+    add eax, ebx
+    shl eax, 1
 
-    ; Draw new ball position (white block)
-    mov word [edi], 0x0FB0        ; '░' with white attribute
+    mov edi, VGA_MEMORY
+    add edi, eax
+    mov word [edi], 0x0FB0
 
-    ; Delay (simple busy loop for animation speed)
+    ; Animation delay.
     mov ecx, 5000000
+
 .delay_loop:
     dec ecx
     jnz .delay_loop
+
     dec ebp
-    jz .kernel
-    jmp .animation_loop
-.kernel:
-    ; Save GDT descriptor to buffer for Rust kernel
-    sgdt [gdt_buffer]
-        
-    ; Call Rust kernel entry point (after splashscreen setup)
+    jnz .animation_loop
+
+    jmp kernel
+
+; ------------------------------------------------------------
+; GDT setup
+;
+; GDTR format in 32-bit mode:
+;   offset +0: 16-bit limit
+;   offset +2: 32-bit linear base
+;
+; Selectors:
+;   0x00 = null
+;   0x08 = ring 0 code
+;   0x10 = ring 0 data
+; ------------------------------------------------------------
+
+setup_gdt:
+    cli
+
+    mov word [gdt_buffer], gdt_end - gdt_table - 1
+    mov dword [gdt_buffer + 2], gdt_table
+
+    lgdt [gdt_buffer]
+
+    ; Reload CS with a far jump.
+    jmp KERNEL_CS:.reload_cs
+
+.reload_cs:
+    mov ax, KERNEL_DS
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+
+    ret
+
+; ------------------------------------------------------------
+; IDT setup
+;
+; Each gate is 8 bytes:
+;   +0: handler offset bits 0-15
+;   +2: code selector
+;   +4: reserved byte
+;   +5: attributes (0x8E)
+;   +6: handler offset bits 16-31
+;
+; This basic IDT maps vectors 0-31 to one handler.
+; ------------------------------------------------------------
+
+setup_idt:
+    cli
+
+    mov edi, idt_table
+    mov ecx, IDT_ENTRIES
+
+.fill_idt:
+    mov eax, idt_handler
+
+    ; Offset low 16 bits.
+    stosw
+
+    ; Kernel code selector.
+    mov ax, KERNEL_CS
+    stosw
+
+    ; Reserved byte = 0.
+    mov al, 0
+    stosb
+
+    ; Interrupt-gate attributes = 0x8E.
+    mov al, 0x8E
+    stosb
+
+    ; Offset high 16 bits.
+    mov eax, idt_handler
+    shr eax, 16
+    stosw
+
+    dec ecx
+    jnz .fill_idt
+
+    ; IDTR limit and base.
+    mov word [idt_ptr], idt_table_end - idt_table - 1
+    mov dword [idt_ptr + 2], idt_table
+
+    lidt [idt_ptr]
+    ret
+
+; ------------------------------------------------------------
+; Basic interrupt handler
+; ------------------------------------------------------------
+
+idt_handler:
+    cli
+    cld
+    pushad
+
+    ; Save segment registers and load kernel data selector.
+    xor eax, eax
+    mov ax, ds
+    push eax
+
+    mov ax, KERNEL_DS
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
     PRINTREGS
-    call rust_kernel_entry
-    PRINTREGS
+    ; Restore the saved segment value and general registers.
+    pop eax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    popad
+
+.halt:
     hlt
+    jmp .halt
 
-; Label stubs for register name push (called by macros)
-.pushreglabel_eax:
-    mov esi, reg_eax
-    ret
-.pushreglabel_ebx:
-    mov esi, reg_ebx
-    ret
-.pushreglabel_ecx:
-    mov esi, reg_ecx
-    ret
-.pushreglabel_edx:
-    mov esi, reg_edx
-    ret
-.pushreglabel_esi:
-    mov esi, reg_esi
-    ret
-.pushreglabel_edi:
-    mov esi, reg_edi
-    ret
-.pushreglabel_ebp:
-    mov esi, reg_ebp
-    ret
-.pushreglabel_esp:
-    mov esi, reg_esp
-    ret
-.pushreglabel_cs:
-    mov esi, reg_cs
-    ret
-.pushreglabel_ds:
-    mov esi, reg_ds
-    ret
-.pushreglabel_es:
-    mov esi, reg_es
-    ret
-.pushreglabel_fs:
-    mov esi, reg_fs
-    ret
-.pushreglabel_gs:
-    mov esi, reg_gs
-    ret
-.pushreglabel_ss:
-    mov esi, reg_ss
-    ret
+; ------------------------------------------------------------
+; Kernel handoff
+; ------------------------------------------------------------
 
-section .data align=4
-msg: db "OS32 booted successfully!", 0
-; 32-bit register labels
+kernel:
+    sti
+    ; GDT and IDT have already been initialized.
+    call rust_kernel_entry
+
+.halt:
+    cli
+    hlt
+    jmp .halt
+
+; ------------------------------------------------------------
+; Read-only initialized data
+; ------------------------------------------------------------
+
+section .rodata align=8
+
+msg:
+    db "OS32 booted successfully!", 0
+
 reg_eax: db "eax:", 0
 reg_ebx: db "ebx:", 0
 reg_ecx: db "ecx:", 0
@@ -292,19 +448,55 @@ reg_esi: db "esi:", 0
 reg_edi: db "edi:", 0
 reg_ebp: db "ebp:", 0
 reg_esp: db "esp:", 0
-; 16-bit segment register labels
-reg_cs:  db "cs:", 0
-reg_ds:  db "ds:", 0
-reg_es:  db "es:", 0
-reg_fs:  db "fs:", 0
-reg_gs:  db "gs:", 0
-reg_ss:  db "ss:", 0
+
+reg_cs: db "cs:", 0
+reg_ds: db "ds:", 0
+reg_es: db "es:", 0
+reg_fs: db "fs:", 0
+reg_gs: db "gs:", 0
+reg_ss: db "ss:", 0
+
+; ------------------------------------------------------------
+; GDT descriptors
+; These must exist in memory before LGDT executes.
+; ------------------------------------------------------------
+
+section .data align=8
+
+gdt_table:
+    dq 0x0000000000000000  ; Null descriptor
+    dq 0x00CF9A000000FFFF  ; 0x08: flat ring 0 code
+    dq 0x00CF92000000FFFF  ; 0x10: flat ring 0 data
+gdt_end:
+
+; ------------------------------------------------------------
+; Zero-initialized data
+; ------------------------------------------------------------
 
 section .bss align=4096
+
 stack_bottom:
-    resb 16384              ; 16KB stack
+    resb 16384
 stack_top:
-ball_x: resw 1              ; Ball X position
-ball_y: resw 1              ; Ball Y position
-ball_dx: resw 1             ; Ball X direction (+1 or -1)
-gdt_buffer: resb 8          ; GDT descriptor buffer (limit: 2 bytes, base: 6 bytes)
+
+ball_x:
+    resw 1
+
+ball_y:
+    resw 1
+
+ball_dx:
+    resw 1
+
+; GDTR: 2-byte limit + 4-byte base.
+gdt_buffer:
+    resb 6
+
+; IDTR: 2-byte limit + 4-byte base.
+idt_ptr:
+    resb 6
+
+; 32 entries x 8 bytes per entry.
+idt_table:
+    resb 32 * 8
+idt_table_end:
