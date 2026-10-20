@@ -413,425 +413,56 @@ IDT_HANDLER 31
 ;   +6: handler offset bits 16-31
 ; ------------------------------------------------------------
 
+%macro IDT_GATE 1
+    mov eax, idt_handler_%1
+    stosw
+    mov ax, KERNEL_CS
+    stosw
+    mov al, 0
+    stosb
+    mov al, 0x8E
+    stosb
+    mov eax, idt_handler_%1
+    shr eax, 16
+    stosw
+%endmacro
+
 setup_idt:
     cli
-
-    ; Fill entry 0
     mov edi, idt_table
-    mov eax, idt_handler_0
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_0
-    shr eax, 16
-    stosw
 
-    ; Fill entry 1
-    mov eax, idt_handler_1
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_1
-    shr eax, 16
-    stosw
-
-    ; Fill entry 2
-    mov eax, idt_handler_2
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_2
-    shr eax, 16
-    stosw
-
-    ; Fill entry 3
-    mov eax, idt_handler_3
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_3
-    shr eax, 16
-    stosw
-
-    ; Fill entry 4
-    mov eax, idt_handler_4
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_4
-    shr eax, 16
-    stosw
-
-    ; Fill entry 5
-    mov eax, idt_handler_5
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_5
-    shr eax, 16
-    stosw
-
-    ; Fill entry 6
-    mov eax, idt_handler_6
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_6
-    shr eax, 16
-    stosw
-
-    ; Fill entry 7
-    mov eax, idt_handler_7
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_7
-    shr eax, 16
-    stosw
-
-    ; Fill entry 8
-    mov eax, idt_handler_8
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_8
-    shr eax, 16
-    stosw
-
-    ; Fill entry 9
-    mov eax, idt_handler_9
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_9
-    shr eax, 16
-    stosw
-
-    ; Fill entry 10
-    mov eax, idt_handler_10
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_10
-    shr eax, 16
-    stosw
-
-    ; Fill entry 11
-    mov eax, idt_handler_11
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_11
-    shr eax, 16
-    stosw
-
-    ; Fill entry 12
-    mov eax, idt_handler_12
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_12
-    shr eax, 16
-    stosw
-
-    ; Fill entry 13
-    mov eax, idt_handler_13
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_13
-    shr eax, 16
-    stosw
-
-    ; Fill entry 14
-    mov eax, idt_handler_14
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_14
-    shr eax, 16
-    stosw
-
-    ; Fill entry 15
-    mov eax, idt_handler_15
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_15
-    shr eax, 16
-    stosw
-
-    ; Fill entry 16
-    mov eax, idt_handler_16
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_16
-    shr eax, 16
-    stosw
-
-    ; Fill entry 17
-    mov eax, idt_handler_17
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_17
-    shr eax, 16
-    stosw
-
-    ; Fill entry 18
-    mov eax, idt_handler_18
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_18
-    shr eax, 16
-    stosw
-
-    ; Fill entry 19
-    mov eax, idt_handler_19
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_19
-    shr eax, 16
-    stosw
-
-    ; Fill entry 20
-    mov eax, idt_handler_20
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_20
-    shr eax, 16
-    stosw
-
-    ; Fill entry 21
-    mov eax, idt_handler_21
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_21
-    shr eax, 16
-    stosw
-
-    ; Fill entry 22
-    mov eax, idt_handler_22
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_22
-    shr eax, 16
-    stosw
-
-    ; Fill entry 23
-    mov eax, idt_handler_23
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_23
-    shr eax, 16
-    stosw
-
-    ; Fill entry 24
-    mov eax, idt_handler_24
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_24
-    shr eax, 16
-    stosw
-
-    ; Fill entry 25
-    mov eax, idt_handler_25
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_25
-    shr eax, 16
-    stosw
-
-    ; Fill entry 26
-    mov eax, idt_handler_26
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_26
-    shr eax, 16
-    stosw
-
-    ; Fill entry 27
-    mov eax, idt_handler_27
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_27
-    shr eax, 16
-    stosw
-
-    ; Fill entry 28
-    mov eax, idt_handler_28
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_28
-    shr eax, 16
-    stosw
-
-    ; Fill entry 29
-    mov eax, idt_handler_29
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_29
-    shr eax, 16
-    stosw
-
-    ; Fill entry 30
-    mov eax, idt_handler_30
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_30
-    shr eax, 16
-    stosw
-
-    ; Fill entry 31
-    mov eax, idt_handler_31
-    stosw
-    mov ax, KERNEL_CS
-    stosw
-    mov al, 0
-    stosb
-    mov al, 0x8E
-    stosb
-    mov eax, idt_handler_31
-    shr eax, 16
-    stosw
+    IDT_GATE 0
+    IDT_GATE 1
+    IDT_GATE 2
+    IDT_GATE 3
+    IDT_GATE 4
+    IDT_GATE 5
+    IDT_GATE 6
+    IDT_GATE 7
+    IDT_GATE 8
+    IDT_GATE 9
+    IDT_GATE 10
+    IDT_GATE 11
+    IDT_GATE 12
+    IDT_GATE 13
+    IDT_GATE 14
+    IDT_GATE 15
+    IDT_GATE 16
+    IDT_GATE 17
+    IDT_GATE 18
+    IDT_GATE 19
+    IDT_GATE 20
+    IDT_GATE 21
+    IDT_GATE 22
+    IDT_GATE 23
+    IDT_GATE 24
+    IDT_GATE 25
+    IDT_GATE 26
+    IDT_GATE 27
+    IDT_GATE 28
+    IDT_GATE 29
+    IDT_GATE 30
+    IDT_GATE 31
 
     ; IDTR limit and base.
     mov word [idt_ptr], idt_table_end - idt_table - 1
