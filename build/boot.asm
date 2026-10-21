@@ -188,6 +188,128 @@ pushreglabel_ss:
     popad
 %endmacro
 
+%macro VGA_PRINT 2
+    pushad
+
+    mov edi, VGA_MEMORY
+    add edi, %2
+
+    mov esi, %1
+    mov ecx, 4
+
+%%printlabel:
+    mov al, [esi]
+    mov ah, VGA_ATTR
+    stosw
+    inc esi
+    dec ecx
+    jnz %%printlabel
+
+    mov ebx, 4
+
+%%digit:
+    mov ecx, ebx
+    dec ecx
+    shl ecx, 2
+
+    mov edx, eax
+    shr edx, cl
+    and edx, 0x0F
+
+    cmp edx, 9
+    jbe %%numeric
+    add dl, 'A' - 10
+    jmp %%write
+
+%%numeric:
+    add dl, '0'
+
+%%write:
+    mov al, dl
+    mov ah, VGA_ATTR
+    stosw
+
+    dec ebx
+    jnz %%digit
+
+    popad
+%endmacro
+
+; ------------------------------------------------------------
+; Print IDT number at row 20 (offset = 20 * 160 = 3200)
+; Input: al = IDT number
+; ------------------------------------------------------------
+
+PRINT_IDT_NUMBER:
+    pushad
+
+    mov edi, VGA_MEMORY
+    add edi, 3200
+
+    ; Print "IDT:" label
+    mov byte [edi], 'I'
+    mov byte [edi+1], VGA_ATTR
+    inc edi
+    inc edi
+
+    mov byte [edi], 'D'
+    mov byte [edi+1], VGA_ATTR
+    inc edi
+    inc edi
+
+    mov byte [edi], 'T'
+    mov byte [edi+1], VGA_ATTR
+    inc edi
+    inc edi
+
+    mov byte [edi], ':'
+    mov byte [edi+1], VGA_ATTR
+    inc edi
+    inc edi
+
+    ; Print IDT number in hex (preserve original in bl)
+    mov bl, al
+
+    ; High nibble
+    mov dl, bl
+    shr dl, 4
+    cmp dl, 9
+    jbe .idt_high_numeric
+    add dl, 'A' - 10
+    jmp .idt_high_write
+.idt_high_numeric:
+    add dl, '0'
+.idt_high_write:
+    mov al, dl
+    mov ah, VGA_ATTR
+    stosw
+
+    ; Low nibble
+    mov dl, bl
+    and dl, 0x0F
+    cmp dl, 9
+    jbe .idt_low_numeric
+    add dl, 'A' - 10
+    jmp .idt_low_write
+.idt_low_numeric:
+    add dl, '0'
+.idt_low_write:
+    mov al, dl
+    mov ah, VGA_ATTR
+    stosw
+
+    popad
+    ret
+
+; ------------------------------------------------------------
+; Print error code at bottom left (row 24, offset = 24 * 160 = 3840)
+; Input: eax = error code
+; ------------------------------------------------------------
+
+PRINT_ERROR_CODE:
+    VGA_PRINT err_label, 3840
+    ret
+
 ; ------------------------------------------------------------
 ; Multiboot v1 header
 ; Keep this in the first 8 KiB of the loaded image.
@@ -340,7 +462,11 @@ setup_gdt:
 idt_handler_%1:
     cli
     cld
+
     pushad
+    ; Print IDT number at row 20
+    mov al, %1
+    call PRINT_IDT_NUMBER
 
     ; Save segment registers and load kernel data selector.
     xor eax, eax
@@ -352,6 +478,15 @@ idt_handler_%1:
     mov es, ax
     mov fs, ax
     mov gs, ax
+
+    ; Handle error codes for vectors that push them
+    ; Vectors 8, 10, 11, 12, 13, 14, 17 push CPU error codes on Pentium
+    ; Error code is at [esp+36] after pushad + segment save (32 + 4 bytes)
+%if %1 == 8 || %1 == 10 || %1 == 11 || %1 == 12 || %1 == 13 || %1 == 14 || %1 == 17
+    mov eax, [esp + 36]
+    call PRINT_ERROR_CODE
+%endif
+
     PRINTREGS
 
     ; Restore the saved segment value and general registers.
@@ -362,6 +497,11 @@ idt_handler_%1:
     mov gs, ax
 
     popad
+
+    ; Remove error code from stack if present (adjusts esp for iret)
+%if %1 == 8 || %1 == 10 || %1 == 11 || %1 == 12 || %1 == 13 || %1 == 14 || %1 == 17
+    add esp, 4
+%endif
 
 .halt:
     hlt
@@ -478,12 +618,12 @@ setup_idt:
 ; ------------------------------------------------------------
 
 kernel:
-    sti
+    cli
 
     ; GDT and IDT have already been initialized.
     ; Interrupts remain disabled until an IRQ/PIC policy is set.
     call rust_kernel_entry
-
+    int 0x3
 .halt:
     cli
     hlt
@@ -513,6 +653,8 @@ reg_es: db "es:", 0
 reg_fs: db "fs:", 0
 reg_gs: db "gs:", 0
 reg_ss: db "ss:", 0
+
+err_label: db "ERR:", 0
 
 ; ------------------------------------------------------------
 ; GDT descriptors
