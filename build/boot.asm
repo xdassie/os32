@@ -455,6 +455,80 @@ setup_gdt:
     ret
 
 ; ------------------------------------------------------------
+; Special IDT handler for int 0x3 (breakpoint) - wait for keypress
+; ------------------------------------------------------------
+
+idt_handler_3:
+    cli
+    cld
+
+    ; Wait for PS/2 keyboard output buffer to be full
+.wait_for_key:
+    in al, 0x64
+    test al, 1
+    jz .wait_for_key
+
+    ; Read scancode from data port
+    in al, 0x60
+
+    ; Print "KEY:" label at row 20, col 0 (offset 3200)
+    mov edi, VGA_MEMORY
+    add edi, 3200
+
+    mov byte [edi], 'K'
+    mov byte [edi+1], VGA_ATTR
+    inc edi
+    inc edi
+
+    mov byte [edi], 'E'
+    mov byte [edi+1], VGA_ATTR
+    inc edi
+    inc edi
+
+    mov byte [edi], 'Y'
+    mov byte [edi+1], VGA_ATTR
+    inc edi
+    inc edi
+
+    mov byte [edi], ':'
+    mov byte [edi+1], VGA_ATTR
+    inc edi
+    inc edi
+
+    ; Print scancode as 2 hex digits
+    mov bl, al
+
+    ; High nibble
+    mov dl, bl
+    shr dl, 4
+    cmp dl, 9
+    jbe .key_high_numeric
+    add dl, 'A' - 10
+    jmp .key_high_write
+.key_high_numeric:
+    add dl, '0'
+.key_high_write:
+    mov al, dl
+    mov ah, VGA_ATTR
+    stosw
+
+    ; Low nibble
+    mov dl, bl
+    and dl, 0x0F
+    cmp dl, 9
+    jbe .key_low_numeric
+    add dl, 'A' - 10
+    jmp .key_low_write
+.key_low_numeric:
+    add dl, '0'
+.key_low_write:
+    mov al, dl
+    mov ah, VGA_ATTR
+    stosw
+
+    iret
+
+; ------------------------------------------------------------
 ; IDT handler macro
 ; ------------------------------------------------------------
 
@@ -512,7 +586,7 @@ idt_handler_%1:
 IDT_HANDLER 0
 IDT_HANDLER 1
 IDT_HANDLER 2
-IDT_HANDLER 3
+; IDT_HANDLER 3 - custom handler above
 IDT_HANDLER 4
 IDT_HANDLER 5
 IDT_HANDLER 6
@@ -623,7 +697,10 @@ kernel:
     ; GDT and IDT have already been initialized.
     ; Interrupts remain disabled until an IRQ/PIC policy is set.
     call rust_kernel_entry
+    ; int 0x3 triggers REPL handler (press any key to continue)
     int 0x3
+    ; Continue after keypress
+    sti
 .halt:
     cli
     hlt

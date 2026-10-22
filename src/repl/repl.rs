@@ -1,8 +1,8 @@
 // REPL module: PS/2 keyboard driver + shell
-    use core::cell::RefCell;
-    use pc_keyboard::{layouts::Us104Key, DecodedKey, HandleControl, ScancodeSet1};
-    use spin::{Lazy, Mutex};
-    use uart_16550::{Config, Uart16550};
+use core::cell::RefCell;
+use pc_keyboard::{layouts::Us104Key, DecodedKey, HandleControl, ScancodeSet1};
+use spin::Mutex;
+use uart_16550::{Config, Uart16550};
 
     const MAX_INPUT: usize = 256;
 
@@ -34,7 +34,7 @@
         }
     }
 
-    pub static KEYBOARD: Lazy<Mutex<PS2Keyboard>> = Lazy::new(|| Mutex::new(PS2Keyboard::new()));
+    pub static KEYBOARD: spin::Lazy<Mutex<PS2Keyboard>> = spin::Lazy::new(|| Mutex::new(PS2Keyboard::new()));
 
     fn process_scancode(byte: u8) -> Option<char> {
         let keyboard = KEYBOARD.lock();
