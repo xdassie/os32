@@ -9,6 +9,7 @@ section .text align=4
 global _start
 global mb_header
 extern rust_kernel_entry
+extern rust_kernel_irq
 
 %define VGA_ATTR       0x0F
 %define KERNEL_CS      0x08
@@ -622,42 +623,28 @@ IDT_HANDLER 29
 IDT_HANDLER 30
 IDT_HANDLER 31
 
-; IRQ handlers (vectors 0x20-0x2F = IRQ 0-15)
-; These acknowledge the PIC before halting
 %macro IRQ_HANDLER 2
 idt_handler_%1:
     cli
     cld
 
-    ; Send EOI to PIC immediately
-    mov al, 0x20
-    out PIC1_CMD, al
-    out PIC2_CMD, al
-
+    ; Preserve interrupted general-purpose registers
     pushad
-    mov al, %1
-    call PRINT_IDT_NUMBER
 
-    xor eax, eax
-    mov ax, ds
-    push eax
+    ; Send EOI to the correct PIC(s).
+    mov al, 0x20
+%if %1 >= 0x28
+    out PIC2_CMD, al       ; Slave PIC for IRQ 8-15
+%endif
+    out PIC1_CMD, al       ; Master PIC
 
-    mov ax, KERNEL_DS
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
+    ; Pass IRQ number = vector - 0x20
+    push dword (%1 - 0x20)
+    call rust_kernel_irq
+    add esp, 4             ; Remove argument
 
-    PRINTREGS
-
-    pop eax
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-
+    ; Restore interrupted registers and return
     popad
-
     iret
 %endmacro
 
@@ -882,7 +869,7 @@ gdt_end:
 section .bss align=4096
 
 stack_bottom:
-    resb 16384
+    resb 32768
 stack_top:
 
 ball_x:

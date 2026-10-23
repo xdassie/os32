@@ -11,8 +11,20 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn rust_kernel_entry() {
-    // SAFETY: Port 0x3F8 is valid COM1 and we have exclusive access
-    let mut uart = unsafe { Uart16550::new_port(0x3F8).unwrap() };
-    uart.init(Config::default()).ok();
-    uart.send_bytes_exact(b"Hello from the Rust kernel\r\n");
+    return;
+}
+
+#[no_mangle]
+pub extern "C" fn rust_kernel_irq(irq_number: u32) {
+    match irq_number {
+        0 => {
+            return;
+        }
+        1 => {
+            let mut uart = unsafe { Uart16550::new_port(0x3F8).unwrap() };
+            uart.init(Config::default()).ok();
+            uart.send_bytes_exact(b"Hello from the Rust keyboard IRQ\r\n");
+        }
+        _ => return,
+    }
 }
