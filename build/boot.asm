@@ -13,8 +13,14 @@ extern rust_kernel_entry
 %define VGA_ATTR       0x0F
 %define KERNEL_CS      0x08
 %define KERNEL_DS      0x10
-%define IDT_ENTRIES    32
+%define IDT_ENTRIES    48
 %define VGA_MEMORY     0xB8000
+
+; PIC ports
+%define PIC1_CMD       0x20
+%define PIC1_DATA      0x21
+%define PIC2_CMD       0xA0
+%define PIC2_DATA      0x21
 
 ; ------------------------------------------------------------
 ; Register-label helpers
@@ -616,6 +622,62 @@ IDT_HANDLER 29
 IDT_HANDLER 30
 IDT_HANDLER 31
 
+; IRQ handlers (vectors 0x20-0x2F = IRQ 0-15)
+; These acknowledge the PIC before halting
+%macro IRQ_HANDLER 2
+idt_handler_%1:
+    cli
+    cld
+
+    ; Send EOI to PIC immediately
+    mov al, 0x20
+    out PIC1_CMD, al
+    out PIC2_CMD, al
+
+    pushad
+    mov al, %1
+    call PRINT_IDT_NUMBER
+
+    xor eax, eax
+    mov ax, ds
+    push eax
+
+    mov ax, KERNEL_DS
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    PRINTREGS
+
+    pop eax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    popad
+
+    iret
+%endmacro
+
+IRQ_HANDLER 32, 0   ; Timer
+IRQ_HANDLER 33, 1   ; Keyboard
+IRQ_HANDLER 34, 2   ; Cascade
+IRQ_HANDLER 35, 3   ; COM2
+IRQ_HANDLER 36, 4   ; COM1
+IRQ_HANDLER 37, 5   ; LPT2
+IRQ_HANDLER 38, 6   ; FDD
+IRQ_HANDLER 39, 7   ; LPT1
+IRQ_HANDLER 40, 8   ; RTC
+IRQ_HANDLER 41, 9   ; Reserved
+IRQ_HANDLER 42, 10  ; Reserved
+IRQ_HANDLER 43, 11  ; Reserved
+IRQ_HANDLER 44, 12  ; PS/2 Mouse
+IRQ_HANDLER 45, 13  ; COPROC
+IRQ_HANDLER 46, 14  ; ATA
+IRQ_HANDLER 47, 15  ; ATA
+
 ; ------------------------------------------------------------
 ; IDT setup
 ;
@@ -677,12 +739,82 @@ setup_idt:
     IDT_GATE 29
     IDT_GATE 30
     IDT_GATE 31
+    IDT_GATE 32
+    IDT_GATE 33
+    IDT_GATE 34
+    IDT_GATE 35
+    IDT_GATE 36
+    IDT_GATE 37
+    IDT_GATE 38
+    IDT_GATE 39
+    IDT_GATE 40
+    IDT_GATE 41
+    IDT_GATE 42
+    IDT_GATE 43
+    IDT_GATE 44
+    IDT_GATE 45
+    IDT_GATE 46
+    IDT_GATE 47
 
     ; IDTR limit and base.
     mov word [idt_ptr], idt_table_end - idt_table - 1
     mov dword [idt_ptr + 2], idt_table
 
     lidt [idt_ptr]
+    ret
+
+; ------------------------------------------------------------
+; PIC initialization
+; Remap PIC1 to 0x20-0x2F, PIC2 to 0x28-0x2F
+; ------------------------------------------------------------
+
+setup_pic:
+    cli
+
+    ; Save current masks
+    in al, PIC1_DATA
+    mov ah, al
+    in al, PIC2_DATA
+    mov bh, al
+
+    ; Start initialization sequence (ICW1)
+    mov al, 0x11
+    out PIC1_CMD, al
+    out PIC2_CMD, al
+
+    ; Set vector offsets (ICW2)
+    ; PIC1 -> 0x20, PIC2 -> 0x28
+    mov al, 0x20
+    out PIC1_DATA, al
+    mov al, 0x28
+    out PIC2_DATA, al
+
+    ; Tell PICs we have 2 PICs (ICW3)
+    mov al, 0x04
+    out PIC1_DATA, al
+    mov al, 0x02
+    out PIC2_DATA, al
+
+    ; ICW4: 8086 mode
+    mov al, 0x01
+    out PIC1_DATA, al
+    out PIC2_DATA, al
+
+    ; Restore masks
+    mov al, ah
+    out PIC1_DATA, al
+    mov al, bh
+    out PIC2_DATA, al
+
+    ret
+
+; Send EOI to PIC
+send_eoi:
+    mov al, 0x20
+    out PIC1_CMD, al
+    ; Check if IRQ from secondary PIC (IRQ 8-15 -> vectors 0x28-0x2F)
+    ; For now, always send to both to be safe
+    out PIC2_CMD, al
     ret
 
 
@@ -692,17 +824,14 @@ setup_idt:
 ; ------------------------------------------------------------
 
 kernel:
-    cli
-
     ; GDT and IDT have already been initialized.
-    ; Interrupts remain disabled until an IRQ/PIC policy is set.
+    ; Initialize PIC before enabling interrupts.
+    call setup_pic
     call rust_kernel_entry
-    ; int 0x3 triggers REPL handler (press any key to continue)
     int 0x3
     ; Continue after keypress
     sti
 .halt:
-    cli
     hlt
     jmp .halt
 
@@ -773,7 +902,7 @@ gdt_buffer:
 idt_ptr:
     resb 6
 
-; 32 entries x 8 bytes per entry.
+; 48 entries x 8 bytes per entry.
 idt_table:
-    resb 32 * 8
+    resb 48 * 8
 idt_table_end:
