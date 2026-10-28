@@ -74,12 +74,8 @@ echo "=== Inspecting ISO contents ==="
 isoinfo -l -i os32.iso 2>/dev/null | grep -E "(os32\.elf|loopback\.cfg|grub\.cfg)" || echo "Files not found in listing"
 
 echo ""
-echo "=== Testing in QEMU (CD-ROM) ==="
-timeout 8 qemu-system-i386 -m 512 -nographic -cdrom os32.iso -boot d -serial stdio 2>&1 | tail -10 || true
-
-echo ""
 echo "=== Testing in QEMU (HD/loopback) ==="
-timeout 8 qemu-system-i386 -m 512 -nographic -drive file=os32.iso,format=raw,if=ide -serial stdio 2>&1 | tail -10 || true
+timeout 8 qemu-system-i386 -d int -m 256 -drive file=os32.iso,format=raw,if=ide -serial stdio 2>&1 | tail -30 || true
 
 echo ""
 echo "=== Super Grub2 Disk USB Testing ==="

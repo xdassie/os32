@@ -8,12 +8,23 @@ BITS 32
 section .text align=4
 global _start
 global mb_header
+global ring3_task
+global ring3_counter_mem
 extern rust_kernel_entry
 extern rust_kernel_irq
+extern vga_print_reg32
+extern vga_print_reg16
+extern vga_print
+extern print_idt_number
+extern print_error_code
+extern print_fault_location
 
 %define VGA_ATTR       0x0F
 %define KERNEL_CS      0x08
 %define KERNEL_DS      0x10
+%define KERNEL_TSS     0x18
+%define USER_CS        0x23        ; GDT index 4, RPL=3
+%define USER_DS        0x2B        ; GDT index 5, RPL=3
 %define IDT_ENTRIES    48
 %define VGA_MEMORY     0xB8000
 
@@ -93,153 +104,33 @@ pushreglabel_ss:
 %endmacro
 
 %macro VGA_PRINT_REG16 2
-    pushad
-
-    mov edi, VGA_MEMORY
-    add edi, %2
-
-    call pushreglabel_%1
-    mov ecx, 4
-
-%%printlabel:
-    mov al, [esi]
-    mov ah, VGA_ATTR
-    stosw
-    inc esi
-    dec ecx
-    jnz %%printlabel
-
-    add edi, 8
-
-    ; Preserve the original 16-bit register value.
-    mov ax, %1
-    movzx ebp, ax
-
-    mov ebx, 4
-
-%%digit:
-    mov ecx, ebx
-    dec ecx
-    shl ecx, 2
-
-    mov edx, ebp
-    shr edx, cl
-    and edx, 0x0F
-
-    cmp edx, 9
-    jbe %%numeric
-    add dl, 'A' - 10
-    jmp %%write
-
-%%numeric:
-    add dl, '0'
-
-%%write:
-    mov al, dl
-    mov ah, VGA_ATTR
-    stosw
-
-    dec ebx
-    jnz %%digit
-
-    popad
+    ; Call Rust function: vga_print_reg16(value, offset, label)
+    ; Push args right-to-left for cdecl calling convention
+    push reg_%1          ; Push label pointer (3rd arg)
+    push dword %2        ; Push offset (2nd arg)
+    push %1              ; Push value (1st arg)
+    call vga_print_reg16
+    add esp, 12          ; Clean up arguments
 %endmacro
 
 %macro VGA_PRINT_REG32 2
-    pushad
-
-    mov edi, VGA_MEMORY
-    add edi, %2
-
-    call pushreglabel_%1
-    mov ecx, 5
-
-%%printlabel:
-    mov al, [esi]
-    mov ah, VGA_ATTR
-    stosw
-    inc esi
-    dec ecx
-    jnz %%printlabel
-
-    add edi, 10
-
-    mov ebp, %1
-    mov ebx, 8
-
-%%digit:
-    mov ecx, ebx
-    dec ecx
-    shl ecx, 2
-
-    mov edx, ebp
-    shr edx, cl
-    and edx, 0x0F
-
-    cmp edx, 9
-    jbe %%numeric
-    add dl, 'A' - 10
-    jmp %%write
-
-%%numeric:
-    add dl, '0'
-
-%%write:
-    mov al, dl
-    mov ah, VGA_ATTR
-    stosw
-
-    dec ebx
-    jnz %%digit
-
-    popad
+    ; Call Rust function: vga_print_reg32(value, offset, label)
+    ; Push args right-to-left for cdecl calling convention
+    push reg_%1          ; Push label pointer (3rd arg)
+    push dword %2        ; Push offset (2nd arg)
+    push %1              ; Push value (1st arg)
+    call vga_print_reg32
+    add esp, 12          ; Clean up arguments
 %endmacro
 
 %macro VGA_PRINT 2
-    pushad
-
-    mov edi, VGA_MEMORY
-    add edi, %2
-
-    mov esi, %1
-    mov ecx, 4
-
-%%printlabel:
-    mov al, [esi]
-    mov ah, VGA_ATTR
-    stosw
-    inc esi
-    dec ecx
-    jnz %%printlabel
-
-    mov ebx, 4
-
-%%digit:
-    mov ecx, ebx
-    dec ecx
-    shl ecx, 2
-
-    mov edx, eax
-    shr edx, cl
-    and edx, 0x0F
-
-    cmp edx, 9
-    jbe %%numeric
-    add dl, 'A' - 10
-    jmp %%write
-
-%%numeric:
-    add dl, '0'
-
-%%write:
-    mov al, dl
-    mov ah, VGA_ATTR
-    stosw
-
-    dec ebx
-    jnz %%digit
-
-    popad
+    ; Call Rust function: vga_print(value, offset, label)
+    ; Push args right-to-left for cdecl calling convention
+    push %1              ; Push label pointer (3rd arg)
+    push dword %2        ; Push offset (2nd arg)
+    push %1              ; Push value (1st arg)
+    call vga_print
+    add esp, 12          ; Clean up arguments
 %endmacro
 
 ; ------------------------------------------------------------
@@ -248,64 +139,12 @@ pushreglabel_ss:
 ; ------------------------------------------------------------
 
 PRINT_IDT_NUMBER:
-    pushad
-
-    mov edi, VGA_MEMORY
-    add edi, 3200
-
-    ; Print "IDT:" label
-    mov byte [edi], 'I'
-    mov byte [edi+1], VGA_ATTR
-    inc edi
-    inc edi
-
-    mov byte [edi], 'D'
-    mov byte [edi+1], VGA_ATTR
-    inc edi
-    inc edi
-
-    mov byte [edi], 'T'
-    mov byte [edi+1], VGA_ATTR
-    inc edi
-    inc edi
-
-    mov byte [edi], ':'
-    mov byte [edi+1], VGA_ATTR
-    inc edi
-    inc edi
-
-    ; Print IDT number in hex (preserve original in bl)
-    mov bl, al
-
-    ; High nibble
-    mov dl, bl
-    shr dl, 4
-    cmp dl, 9
-    jbe .idt_high_numeric
-    add dl, 'A' - 10
-    jmp .idt_high_write
-.idt_high_numeric:
-    add dl, '0'
-.idt_high_write:
-    mov al, dl
-    mov ah, VGA_ATTR
-    stosw
-
-    ; Low nibble
-    mov dl, bl
-    and dl, 0x0F
-    cmp dl, 9
-    jbe .idt_low_numeric
-    add dl, 'A' - 10
-    jmp .idt_low_write
-.idt_low_numeric:
-    add dl, '0'
-.idt_low_write:
-    mov al, dl
-    mov ah, VGA_ATTR
-    stosw
-
-    popad
+    ; Call Rust function: print_idt_number(idt_num)
+    ; al already contains the IDT number
+    movzx eax, al        ; Zero-extend al to eax
+    push eax             ; Push idt_num as argument
+    call print_idt_number
+    add esp, 4           ; Clean up stack
     ret
 
 ; ------------------------------------------------------------
@@ -314,7 +153,24 @@ PRINT_IDT_NUMBER:
 ; ------------------------------------------------------------
 
 PRINT_ERROR_CODE:
-    VGA_PRINT err_label, 3840
+    ; Call Rust function: print_error_code(error_code)
+    ; eax already contains the error code
+    push eax             ; Preserve caller's eax and pass as argument
+    call print_error_code
+    pop eax              ; Restore caller's eax
+    ret
+
+; ------------------------------------------------------------
+; Print fault location (EIP) at row 23 (offset = 23 * 160 = 3680)
+; Input: eax = EIP value
+; ------------------------------------------------------------
+
+PRINT_FAULT_LOCATION:
+    ; Call Rust function: print_fault_location(eip)
+    ; eax already contains the EIP
+    push eax             ; Preserve caller's eax and pass as argument
+    call print_fault_location
+    pop eax              ; Restore caller's eax
     ret
 
 ; ------------------------------------------------------------
@@ -443,6 +299,26 @@ _start:
 setup_gdt:
     cli
 
+    ; Setup TSS descriptor with correct base address
+    ; Standard Intel 32-bit TSS is 104 bytes (0x68)
+    ; Limit = 103 (0x67) for TSS
+    ; Standard Intel descriptor format:
+    ;   Bytes 0-1: limit[15:0]
+    ;   Bytes 2-4: base[23:0]
+    ;   Byte 5: access
+    ;   Byte 6: flags(4) + limit[19:16](4)
+    ;   Byte 7: base[31:24]
+    mov eax, tss                    ; TSS base address
+    mov word [gdt_table + 24], 0x0067     ; limit[15:0] = 0x0067
+    movzx ebx, word [eax]               ; base[15:0]
+    mov [gdt_table + 26], bx
+    movzx ebx, byte [eax + 2]           ; base[23:16]
+    mov [gdt_table + 28], bl            ; base[23:16]
+    mov byte [gdt_table + 29], 0x89     ; access = 0x89 (TSS available)
+    mov byte [gdt_table + 30], 0x00     ; flags + limit[19:16] = 0x00
+    mov byte [gdt_table + 31], 0x00     ; base[31:24] = 0x00
+    
+    ; GDT limit: (6 descriptors * 8 bytes) - 1 = 47
     mov word [gdt_buffer], gdt_end - gdt_table - 1
     mov dword [gdt_buffer + 2], gdt_table
 
@@ -459,6 +335,16 @@ setup_gdt:
     mov gs, ax
     mov ss, ax
 
+    ; Initialize TSS fields
+    ; esp0/ss0 for ring 0 exceptions
+    mov eax, stack_top
+    mov [tss], eax           ; esp0 (offset 0)
+    mov word [tss + 4], KERNEL_DS  ; ss0 (offset 4)
+
+    ; Load Task Register with TSS selector
+    mov ax, KERNEL_TSS
+    ltr ax
+
     ret
 
 ; ------------------------------------------------------------
@@ -468,6 +354,11 @@ setup_gdt:
 idt_handler_3:
     cli
     cld
+
+    ; Set up data segment for VGA access
+    mov ax, KERNEL_DS
+    mov ds, ax
+    mov es, ax
 
     ; Wait for PS/2 keyboard output buffer to be full
 .wait_for_key:
@@ -562,10 +453,18 @@ idt_handler_%1:
 
     ; Handle error codes for vectors that push them
     ; Vectors 8, 10, 11, 12, 13, 14, 17 push CPU error codes on Pentium
-    ; Error code is at [esp+36] after pushad + segment save (32 + 4 bytes)
+    ; Stack after pushad: [esp+0..31]=regs, [esp+32]=error_code, [esp+36]=ss, [esp+40]=eip
+    ; Error code is at [esp+32] (pushad saves 8 regs x 4 = 32 bytes)
 %if %1 == 8 || %1 == 10 || %1 == 11 || %1 == 12 || %1 == 13 || %1 == 14 || %1 == 17
-    mov eax, [esp + 36]
+    mov eax, [esp + 32]
     call PRINT_ERROR_CODE
+%endif
+
+    ; For IDT 0xD (General Protection Fault), print faulting EIP
+    ; Exception frame after pushad: [esp+32]=errcode, [esp+36]=ss, [esp+40]=eip
+%if %1 == 13
+    mov eax, [esp + 40]
+    call PRINT_FAULT_LOCATION
 %endif
 
     PRINTREGS
@@ -628,6 +527,19 @@ idt_handler_%1:
     cli
     cld
 
+    ; Save current segment registers
+    push ds
+    push es
+    push fs
+    push gs
+
+    ; Load kernel data segment for Rust code
+    mov ax, KERNEL_DS
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
     ; Preserve interrupted general-purpose registers
     pushad
 
@@ -643,10 +555,51 @@ idt_handler_%1:
     call rust_kernel_irq
     add esp, 4             ; Remove argument
 
-    ; Restore interrupted registers and return
+    ; Restore interrupted registers
     popad
+
+    ; Restore segment registers
+    pop gs
+    pop fs
+    pop es
+    pop ds
+
     iret
 %endmacro
+
+; ------------------------------------------------------------
+; Ring 3 task - runs in user mode, increments counter
+; ------------------------------------------------------------
+
+ring3_task:
+    ; Ring 3 entry point!
+    nop                         ; First instruction in ring 3
+    nop
+    nop
+    ; Load ring 3 data segment (DS/ES not auto-loaded by IRET)
+    mov ax, USER_DS
+    mov ds, ax
+    mov es, ax
+    ; Write 'R3' to VGA to confirm ring 3 entry
+    mov edi, VGA_MEMORY
+    mov word [edi], 0x0752      ; 'R' white on black
+    mov word [edi + 2], 0x0733  ; '3' white on black
+
+    ; Initialize ring 3 counter location
+    mov dword [ring3_counter_mem], 0
+
+.r3_loop:
+    ; Increment counter (visible from ring 0 via memory)
+    inc dword [ring3_counter_mem]
+
+    ; Small delay
+    mov ecx, 1000
+.r3_delay:
+    dec ecx
+    jnz .r3_delay
+
+    ; Continue looping - stay in ring 3
+    jmp .r3_loop
 
 IRQ_HANDLER 32, 0   ; Timer
 IRQ_HANDLER 33, 1   ; Keyboard
@@ -807,6 +760,11 @@ send_eoi:
 
 
 ; ------------------------------------------------------------
+; Page table setup - DISABLED for now (flat memory model)
+; Re-enable when virtual memory needed
+; ------------------------------------------------------------
+
+; ------------------------------------------------------------
 ; Kernel handoff
 ; ------------------------------------------------------------
 
@@ -815,9 +773,26 @@ kernel:
     ; Initialize PIC before enabling interrupts.
     call setup_pic
     call rust_kernel_entry
-    int 0x3
-    ; Continue after keypress
+    ; Continue - launch ring 3 task via IRET
     sti
+
+    ; Initialize ring 3 counter
+    xor eax, eax
+    mov dword [ring3_counter_mem], eax
+
+    ; Ring 3 transition via IRET
+    ; Push frame: ss, esp, eflags, cs, eip (IRET pops in reverse)
+    ; Selectors: USER_CS=0x20, USER_DS=0x28 (DPL=3)
+    ; Use 32-bit pushes to ensure proper stack alignment
+
+    push dword USER_DS         ; ss (32-bit, zero-extended)
+    push ring3_stack_top       ; esp (32-bit)
+    push dword 0x202           ; eflags (32-bit, reserved bit 1 + IF)
+    push dword USER_CS         ; cs (32-bit, zero-extended)
+    push ring3_task            ; eip (32-bit)
+
+    iret
+
 .halt:
     hlt
     jmp .halt
@@ -860,6 +835,9 @@ gdt_table:
     dq 0x0000000000000000  ; Null descriptor
     dq 0x00CF9A000000FFFF  ; 0x08: flat ring 0 code
     dq 0x00CF92000000FFFF  ; 0x10: flat ring 0 data
+    dq 0x0000890000000000  ; 0x18: TSS descriptor (placeholder - runtime sets base)
+    dq 0x0000CFAA0000FFFF  ; 0x20: flat ring 3 code (access=0xAA=DPL3+Type10, base=0)
+    dq 0x0000CFB30000FFFF  ; 0x28: flat ring 3 data (access=0xB3=DPL3+Type3, base=0)
 gdt_end:
 
 ; ------------------------------------------------------------
@@ -881,6 +859,15 @@ ball_y:
 ball_dx:
     resw 1
 
+; Ring 3 stack
+ring3_stack_bottom:
+    resb 4096
+ring3_stack_top:
+
+; Ring 3 counter (shared with Rust)
+ring3_counter_mem:
+    resd 1
+
 ; GDTR: 2-byte limit + 4-byte base.
 gdt_buffer:
     resb 6
@@ -893,3 +880,41 @@ idt_ptr:
 idt_table:
     resb 48 * 8
 idt_table_end:
+
+; TSS (Task State Segment) - 32 bytes for protected mode
+; Moved to .data section to allow initialization
+; 32-bit TSS format (104 bytes = 0x68)
+section .data align=8
+
+tss:
+    ; Intel 32-bit Task State Segment (104 bytes, limit=103=0x67)
+    dd stack_top        ; esp0 (offset 0x00)
+    dw KERNEL_DS        ; ss0 (offset 0x04)
+    dw 0                ; reserved (offset 0x06)
+    dd 0                ; esp1 (offset 0x08)
+    dw 0                ; ss1 (offset 0x0C)
+    dw 0                ; reserved (offset 0x0E)
+    dd 0                ; esp2 (offset 0x10)
+    dw 0                ; ss2 (offset 0x14)
+    dw 0                ; reserved (offset 0x16)
+    dd 0                ; cr3 (offset 0x18)
+    dd 0                ; eip (offset 0x1C)
+    dd 0                ; eflags (offset 0x20)
+    dd 0                ; eax (offset 0x24)
+    dd 0                ; ecx (offset 0x28)
+    dd 0                ; edx (offset 0x2C)
+    dd 0                ; ebx (offset 0x30)
+    dd 0                ; esp (offset 0x34)
+    dd 0                ; ebp (offset 0x38)
+    dd 0                ; esi (offset 0x3C)
+    dd 0                ; edi (offset 0x40)
+    dw 0                ; es (offset 0x44)
+    dw 0                ; cs (offset 0x48)
+    dw 0                ; ss (offset 0x4C)
+    dw 0                ; ds (offset 0x50)
+    dw 0                ; fs (offset 0x54)
+    dw 0                ; gs (offset 0x58)
+    dw 0                ; ldt (offset 0x5C)
+    dw 0                ; trace bit + reserved (offset 0x60)
+    dw 0FFh             ; iomap_base (offset 0x64, must be 0xFF for no I/O map)
+    ; Total size: 104 bytes (0x68), limit = 103 (0x67)
