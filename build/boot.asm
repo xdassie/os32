@@ -453,17 +453,22 @@ idt_handler_%1:
 
     ; Handle error codes for vectors that push them
     ; Vectors 8, 10, 11, 12, 13, 14, 17 push CPU error codes on Pentium
-    ; Stack after pushad: [esp+0..31]=regs, [esp+32]=error_code, [esp+36]=ss, [esp+40]=eip
-    ; Error code is at [esp+32] (pushad saves 8 regs x 4 = 32 bytes)
+    ; Stack layout after pushad + push idt_num:
+    ;   [esp+0] = idt_num (pushed by PRINT_IDT_NUMBER)
+    ;   [esp+4] = return address
+    ;   [esp+8..39] = pushad saved registers (32 bytes)
+    ;   [esp+40] = error code (pushed by CPU)
+    ;   [esp+44] = ss (pushed by CPU)
+    ;   [esp+48] = eip (pushed by CPU)
 %if %1 == 8 || %1 == 10 || %1 == 11 || %1 == 12 || %1 == 13 || %1 == 14 || %1 == 17
-    mov eax, [esp + 32]
+    mov eax, [esp + 40]
     call PRINT_ERROR_CODE
 %endif
 
     ; For IDT 0xD (General Protection Fault), print faulting EIP
-    ; Exception frame after pushad: [esp+32]=errcode, [esp+36]=ss, [esp+40]=eip
+    ; EIP is at [esp+48] (after error code at +40 and ss at +44)
 %if %1 == 13
-    mov eax, [esp + 40]
+    mov eax, [esp + 48]
     call PRINT_FAULT_LOCATION
 %endif
 
@@ -836,8 +841,8 @@ gdt_table:
     dq 0x00CF9A000000FFFF  ; 0x08: flat ring 0 code
     dq 0x00CF92000000FFFF  ; 0x10: flat ring 0 data
     dq 0x0000890000000000  ; 0x18: TSS descriptor (placeholder - runtime sets base)
-    dq 0x0000CFAA0000FFFF  ; 0x20: flat ring 3 code (access=0xAA=DPL3+Type10, base=0)
-    dq 0x0000CFB30000FFFF  ; 0x28: flat ring 3 data (access=0xB3=DPL3+Type3, base=0)
+    dq 0x00CFFA000000FFFF  ; 0x20: flat ring 3 code (access=0xFA=DPL3+Type10, base=0)
+    dq 0x00CFF2000000FFFF  ; 0x28: flat ring 3 data (access=0xF2=DPL3+Type2, base=0)
 gdt_end:
 
 ; ------------------------------------------------------------

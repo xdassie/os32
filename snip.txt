@@ -3,3 +3,22 @@
 0x10bfec:	0x001027c6
 (gdb) n
 436	    cld
+[dave@archlinux os32]$ fg
+./debug-ring3.sh
+n
+n
+438	    pushad
+(gdb) 
+440	    mov al, %1
+(gdb) 
+441	    call PRINT_IDT_NUMBER
+(gdb) 
+144	    movzx eax, al        ; Zero-extend al to eax
+(gdb) 
+145	    push eax             ; Push idt_num as argument
+(gdb) 
+146	    call print_idt_number
+(gdb) x/10wx $esp
+0x10bfb4:	0x0000000d	0x001010ed	0x000b87a8	0x00103b12
+0x10bfc4:	0x00000000	0x0010bfdc	0x0000b814	0x00000000
+0x10bfd4:	0x00000000	0x00000000
