@@ -172,10 +172,6 @@ unsafe fn validate_tss() -> bool {
     // - Selector TI bit (bit 2) should be 0 for GDT (not LDT)
     // - Selector RPL (bits 0-1) should be 0 for ring 0
     // - Selector index (bits 3-15) should point to valid GDT entry
-    let ti = (selector >> 2) & 1;  // Table Indicator: 0=GDT, 1=LDT
-    let rpl = selector & 0x3;      // Request Privilege Level
-    let index = selector >> 3;     // GDT entry index
-    
     // TSS is valid if selector is non-zero
     let valid = selector != 0;
     

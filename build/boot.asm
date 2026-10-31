@@ -16,12 +16,13 @@ extern rust_kernel_irq
 %define KERNEL_DS      0x10
 %define IDT_ENTRIES    48
 %define VGA_MEMORY     0xB8000
+%define TSS_SELECTOR   0x28
 
 ; PIC ports
 %define PIC1_CMD       0x20
 %define PIC1_DATA      0x21
 %define PIC2_CMD       0xA0
-%define PIC2_DATA      0x21
+%define PIC2_DATA      0xA1
 
 ; ------------------------------------------------------------
 ; Register-label helpers
@@ -443,6 +444,25 @@ _start:
 setup_gdt:
     cli
 
+    ; Initialize TSS with stack pointers (Intel Manual Vol 3A, Table 3-8)
+    ; Only ESP0/SS0 needed - we use ring 0 (kernel) and ring 3 (user) only
+    mov dword [tss + 4], ring0_stack_top  ; ESP0 (offset 4) - Ring 0 stack for interrupts
+    mov word [tss + 8], KERNEL_DS         ; SS0 (offset 8) - Ring 0 data selector
+    ; ESP1/SS1 and ESP2/SS2 not used (we don't have ring 1 or 2)
+    mov word [tss + 100], 104             ; I/O map base (offset 100)
+
+    ; Initialize TSS descriptor in GDT at offset 40 (selector 0x28)
+    ; Format: byte 0-1=limit, 2-4=base[0:23], 5=access, 6=flags[0:3]|base[24:27], 7=base[28:31]
+    mov word [gdt_table + 40], 0x0067    ; Limit = 103 (104 bytes - 1)
+    
+    mov eax, tss                          ; TSS base address
+    mov word [gdt_table + 42], ax        ; Base[0:15] at bytes 2-3
+    mov bl, ah                            ; Base[16:23]
+    mov [gdt_table + 44], bl              ; Base[16:23] at byte 4
+    
+    mov byte [gdt_table + 45], 0x89      ; Access byte at byte 5: P=1, DPL=00, S=0, type=1001 (available TSS)
+    mov byte [gdt_table + 46], 0x00      ; Flags[0:3]=0000, Base[24:31]=00000000 at bytes 6-7
+
     mov word [gdt_buffer], gdt_end - gdt_table - 1
     mov dword [gdt_buffer + 2], gdt_table
 
@@ -458,6 +478,10 @@ setup_gdt:
     mov fs, ax
     mov gs, ax
     mov ss, ax
+
+    ; Load TSS
+    mov ax, TSS_SELECTOR
+    ltr ax
 
     ret
 
@@ -857,9 +881,14 @@ err_label: db "ERR:", 0
 section .data align=8
 
 gdt_table:
-    dq 0x0000000000000000  ; Null descriptor
+    dq 0x0000000000000000  ; 0x00: Null descriptor
     dq 0x00CF9A000000FFFF  ; 0x08: flat ring 0 code
     dq 0x00CF92000000FFFF  ; 0x10: flat ring 0 data
+    dq 0x00CFFFFA0000FFFF  ; 0x18: flat ring 3 code
+    dq 0x00CFFFF20000FFFF  ; 0x20: flat ring 3 data
+    ; 0x28: TSS descriptor - will be filled in at runtime
+    dd 0x00000000          ; TSS low 32 bits (limit + base[0:23])
+    dd 0x00000000          ; TSS high 32 bits (access + flags + base[24:31])
 gdt_end:
 
 ; ------------------------------------------------------------
@@ -871,6 +900,16 @@ section .bss align=4096
 stack_bottom:
     resb 32768
 stack_top:
+
+; Ring-specific stacks (8KB each)
+; Only ring 0 and ring 3 are used (no ring 1 or 2)
+ring0_stack_bottom:
+    resb 8192
+ring0_stack_top:
+
+ring3_stack_bottom:
+    resb 8192
+ring3_stack_top:
 
 ball_x:
     resw 1
@@ -893,3 +932,8 @@ idt_ptr:
 idt_table:
     resb 48 * 8
 idt_table_end:
+
+; TSS structure (Intel Manual Vol 3A, Table 3-8) - raw layout
+tss:
+    resb 104          ; TSS raw data (initialized at runtime)
+tss_end:
