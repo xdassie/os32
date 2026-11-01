@@ -457,11 +457,11 @@ setup_gdt:
     
     mov eax, tss                          ; TSS base address
     mov word [gdt_table + 42], ax        ; Base[0:15] at bytes 2-3
-    mov bl, ah                            ; Base[16:23]
-    mov [gdt_table + 44], bl              ; Base[16:23] at byte 4
+    shr eax, 16                           ; Move base[16:31] to low 16 bits
+    mov [gdt_table + 44], al              ; Base[16:23] at byte 4
+    mov [gdt_table + 46], ah              ; Base[24:31] at byte 6
     
     mov byte [gdt_table + 45], 0x89      ; Access byte at byte 5: P=1, DPL=00, S=0, type=1001 (available TSS)
-    mov byte [gdt_table + 46], 0x00      ; Flags[0:3]=0000, Base[24:31]=00000000 at bytes 6-7
 
     mov word [gdt_buffer], gdt_end - gdt_table - 1
     mov dword [gdt_buffer + 2], gdt_table
