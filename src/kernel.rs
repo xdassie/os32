@@ -8,7 +8,9 @@ use uart_16550::{Config, Uart16550};
 const VGA_BUFFER: *mut u8 = 0xB8000 as *mut u8;
 const VGA_COLUMNS: usize = 80;
 const VGA_ROWS: usize = 25;
-const VGA_ATTR_WHITE: u8 = 0x0F;
+const VGA_ATTR_WHITE: u8 = 0x0F;  // White on black
+const VGA_ATTR_GREEN: u8 = 0x0A;  // Light green on black
+const VGA_ATTR_BLUE: u8 = 0x0B;   // Light blue on black
 
 // Moving display state
 static mut VGA_X: usize = 0;
@@ -32,15 +34,33 @@ static mut TSS_CPL_VALID: bool = false;
 static mut TSS_ESP0: u32 = 0;        // Ring 0 stack pointer from TSS
 static mut TSS_SS0: u16 = 0;         // Ring 0 stack selector from TSS
 
+// GPF Stack Browser state
+static mut GPF_ERROR_CODE: u32 = 0;
+static mut GPF_SS: u16 = 0;
+static mut GPF_ESP: u32 = 0;
+static mut GPF_EFLAGS: u32 = 0;
+static mut GPF_CS: u16 = 0;
+static mut GPF_EIP: u32 = 0;
+static mut GPF_STACK_OFFSET: i32 = 0;
+static mut IN_GPF_BROWSER: bool = false;
+
+/// Ring 3 task counter (shared with bootloader)
+extern "C" {
+    static ring3_task_counter: u32;
+}
+
 /// Clear VGA screen with spaces
 unsafe fn vga_clear() {
-    let total_cells = VGA_COLUMNS * VGA_ROWS;
-    let mut i: usize = 0;
-    while i < total_cells {
-        let addr = VGA_BUFFER as usize + (i * 2);
-        *(addr as *mut u8) = b' ';
-        *(addr as *mut u8).offset(1) = VGA_ATTR_WHITE;
-        i += 1;
+    vga_clear_rows(0, VGA_ROWS);
+}
+
+/// Clear specific rows of the VGA display
+unsafe fn vga_clear_rows(start_row: usize, end_row: usize) {
+    let clamped_end = if end_row > VGA_ROWS { VGA_ROWS } else { end_row };
+    for y in start_row..clamped_end {
+        for x in 0..VGA_COLUMNS {
+            vga_write_char(x, y, b' ', VGA_ATTR_WHITE);
+        }
     }
 }
 
@@ -306,9 +326,54 @@ unsafe fn validate_tss_cpl() -> bool {
     esp_valid && ss0_valid
 }
 
+/// Validate stack setup for ring 3 transition
+/// This function checks that the stack is correctly configured before transitioning to ring 3
+/// Halts the system if validation fails (does not return)
+/// If all validations pass, returns normally and caller can proceed with IRET
+#[no_mangle]
+pub extern "C" fn validate_ring3_stack(ring3_esp: u32) {
+    unsafe {
+        // Get current ESP (kernel stack pointer)
+        let current_esp: u32;
+        core::arch::asm!("mov {0}, esp", out(reg) current_esp);
+        
+        // Validate current kernel stack pointer
+        if current_esp == 0 || current_esp >= 0x10000000 {
+            // Halt on invalid kernel stack
+            vga_write_str(0, 7, b"R3_STACK: FAIL err=1", VGA_ATTR_WHITE);
+            core::arch::asm!("cli");
+            loop {}
+        }
+        
+        // Validate ring 3 stack pointer parameter
+        if ring3_esp == 0 || ring3_esp >= 0x10000000 {
+            vga_write_str(0, 7, b"R3_STACK: FAIL err=2", VGA_ATTR_WHITE);
+            core::arch::asm!("cli");
+            loop {}
+        }
+        
+        // Validate TSS ESP0 (ring 0 stack for interrupts from ring 3)
+        if TSS_ESP0 == 0 || TSS_ESP0 >= 0x10000000 {
+            vga_write_str(0, 7, b"R3_STACK: FAIL err=3", VGA_ATTR_WHITE);
+            core::arch::asm!("cli");
+            loop {}
+        }
+        
+        // Validate TSS SS0 selector (should be kernel data selector 0x10)
+        if TSS_SS0 != 0x10 {
+            vga_write_str(0, 7, b"R3_STACK: FAIL err=4", VGA_ATTR_WHITE);
+            core::arch::asm!("cli");
+            loop {}
+        }
+        
+        // All validations passed - return normally
+    }
+}
+
 /// Draw moving display animation with validation
 unsafe fn vga_draw_moving_display() {
-    vga_clear();
+    // Clear only top half (rows 0-11) - leave bottom half for GPF handler
+    vga_clear_rows(0, 12);
 
     // Validate GDT, IDT, TSS and CPL configuration
     validate_gdt();
@@ -406,11 +471,31 @@ unsafe fn vga_draw_moving_display() {
         vga_write_str(48, 5, b" exp=10", VGA_ATTR_WHITE);
     }
 
+    // Draw ring 3 task counter at row 6
+    vga_write_str(0, 6, b"RING3_TASK: ", VGA_ATTR_WHITE);
+    let counter = unsafe { ring3_task_counter };
+    let d0 = b'0' + ((counter / 10000000) % 10) as u8;
+    let d1 = b'0' + ((counter / 1000000) % 10) as u8;
+    let d2 = b'0' + ((counter / 100000) % 10) as u8;
+    let d3 = b'0' + ((counter / 10000) % 10) as u8;
+    let d4 = b'0' + ((counter / 1000) % 10) as u8;
+    let d5 = b'0' + ((counter / 100) % 10) as u8;
+    let d6 = b'0' + ((counter / 10) % 10) as u8;
+    let d7 = b'0' + (counter % 10) as u8;
+    vga_write_char(12, 6, d0, VGA_ATTR_WHITE);
+    vga_write_char(13, 6, d1, VGA_ATTR_WHITE);
+    vga_write_char(14, 6, d2, VGA_ATTR_WHITE);
+    vga_write_char(15, 6, d3, VGA_ATTR_WHITE);
+    vga_write_char(16, 6, d4, VGA_ATTR_WHITE);
+    vga_write_char(17, 6, d5, VGA_ATTR_WHITE);
+    vga_write_char(18, 6, d6, VGA_ATTR_WHITE);
+    vga_write_char(19, 6, d7, VGA_ATTR_WHITE);
+
     // Update bouncing ball position
     let mut new_x = VGA_X as i32 + VGA_DX;
     let mut new_y = VGA_Y as i32 + VGA_DY;
 
-    // Bounce off edges (avoid validation rows 0-5)
+    // Bounce off edges - keep within top half (rows 0-11)
     if new_x >= VGA_COLUMNS as i32 {
         VGA_DX = -1;
         new_x = VGA_COLUMNS as i32 - 1;
@@ -418,12 +503,12 @@ unsafe fn vga_draw_moving_display() {
         VGA_DX = 1;
         new_x = 0;
     }
-    if new_y >= VGA_ROWS as i32 {
+    if new_y >= 11 {
         VGA_DY = -1;
-        new_y = VGA_ROWS as i32 - 1;
-    } else if new_y < 6 {
+        new_y = 11;
+    } else if new_y < 0 {
         VGA_DY = 1;
-        new_y = 6;
+        new_y = 0;
     }
     VGA_X = new_x as usize;
     VGA_Y = new_y as usize;
@@ -442,6 +527,228 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[no_mangle]
 pub extern "C" fn rust_kernel_entry() {
     return;
+}
+
+/// GPF (General Protection Fault) handler - vector 13 (0xD)
+/// Interactive stack browser that allows navigating the stack with keyboard
+#[no_mangle]
+pub extern "C" fn rust_gpf_handler(
+    error_code: u32,
+    ss: u16,
+    esp: u32,
+    eflags: u32,
+    cs: u16,
+    eip: u32,
+) {
+    // Store fault state in statics for the browser
+    unsafe {
+        GPF_ERROR_CODE = error_code;
+        GPF_SS = ss;
+        GPF_ESP = esp;
+        GPF_EFLAGS = eflags;
+        GPF_CS = cs;
+        GPF_EIP = eip;
+        GPF_STACK_OFFSET = 0;
+        IN_GPF_BROWSER = true;
+    }
+
+    // Initial display
+    unsafe { gpf_browser_display(); }
+
+    // Keep IRQs enabled for keyboard input
+    unsafe {
+        core::arch::asm!("sti");
+    }
+
+    // Main loop - wait for keyboard input
+    loop {
+        unsafe {
+            // Poll keyboard
+            if let Some(key) = poll_keyboard_key() {
+                match key {
+                    '\x1B' => { /* ESC - could exit/reboot */ }
+                    '\n' | '\r' => { /* Enter - could do something */ }
+                    '+' | '=' => {
+                        GPF_STACK_OFFSET = GPF_STACK_OFFSET.wrapping_add(4);
+                        gpf_browser_display();
+                    }
+                    '-' | '_' => {
+                        GPF_STACK_OFFSET = GPF_STACK_OFFSET.wrapping_sub(4);
+                        gpf_browser_display();
+                    }
+                    'w' | 'W' | '\x5D' => { /* Up arrow (0x5D is up scancode) */
+                        GPF_STACK_OFFSET = GPF_STACK_OFFSET.wrapping_sub(4);
+                        gpf_browser_display();
+                    }
+                    's' | 'S' => {
+                        GPF_STACK_OFFSET = GPF_STACK_OFFSET.wrapping_add(4);
+                        gpf_browser_display();
+                    }
+                    ' ' => { /* Space - page down (+16) */
+                        GPF_STACK_OFFSET = GPF_STACK_OFFSET.wrapping_add(16);
+                        gpf_browser_display();
+                    }
+                    ',' => { /* Comma - page up (-16) */
+                        GPF_STACK_OFFSET = GPF_STACK_OFFSET.wrapping_sub(16);
+                        gpf_browser_display();
+                    }
+                    _ => {}
+                }
+            }
+            // Small delay to prevent busy-waiting
+            core::arch::asm!("pause");
+        }
+    }
+}
+
+/// Poll for a single keyboard character from PS/2 port
+unsafe fn poll_keyboard_key() -> Option<char> {
+    // Check if keyboard has data (KBD_STATUS port 0x64, bit 0 = output buffer full)
+    let status: u8;
+    core::arch::asm!("in al, 0x64", "mov {}, al", out(reg_byte) status);
+    
+    if status & 0x01 != 0 {
+        // Data available, read scancode from data port 0x60
+        let scancode: u8;
+        core::arch::asm!("in al, 0x60", "mov {}, al", out(reg_byte) scancode);
+        
+        // Ignore break codes (0x80 set)
+        if scancode & 0x80 != 0 {
+            return None;
+        }
+        
+        // AT keyboard scancode to character mapping (set 1)
+        match scancode {
+            // Numbers
+            0x02 => Some('1'),
+            0x03 => Some('2'),
+            0x04 => Some('3'),
+            0x05 => Some('4'),
+            0x06 => Some('5'),
+            0x07 => Some('6'),
+            0x08 => Some('7'),
+            0x09 => Some('8'),
+            0x0A => Some('9'),
+            0x0B => Some('0'),
+            0x0C => Some('-'),
+            0x0D => Some('='),
+            
+            // Letters (top row)
+            0x1C => Some('q'),
+            0x1E => Some('w'),
+            0x1F => Some('e'),
+            0x20 => Some('r'),
+            0x21 => Some('t'),
+            0x22 => Some('y'),
+            0x23 => Some('u'),
+            0x24 => Some('i'),
+            0x25 => Some('o'),
+            0x26 => Some('p'),
+            0x27 => Some('['),
+            0x28 => Some(']'),
+            
+            // Letters (middle row)
+            0x2A => Some('a'),
+            0x2B => Some('s'),
+            0x2C => Some('d'),
+            0x2D => Some('f'),
+            0x2E => Some('g'),
+            0x2F => Some('h'),
+            0x30 => Some('j'),
+            0x31 => Some('k'),
+            0x32 => Some('l'),
+            0x33 => Some(';'),
+            0x34 => Some('\''),
+            0x35 => Some('`'),
+            
+            // Letters (bottom row)
+            0x36 => Some('z'),
+            0x37 => Some('x'),
+            0x38 => Some('c'),
+            0x39 => Some('v'),
+            0x3A => Some('b'),
+            0x3B => Some('n'),
+            0x3C => Some('m'),
+            0x3D => Some(','),
+            0x3E => Some('.'),
+            0x3F => Some('/'),
+            
+            // Special keys
+            0x01 => Some('\x1B'), // ESC
+            0x1D => Some(' '),    // Space
+            0x19 => Some('\n'),   // Enter
+            0x29 => Some('\r'),   // Backspace
+            
+            // Arrow keys
+            0x4B => Some('w'),    // Up arrow
+            0x50 => Some('s'),    // Down arrow
+            0x4D => Some('d'),    // Right arrow
+            0x48 => Some('a'),    // Left arrow
+            
+            // Numpad
+            0x75 => Some('+'),    // Numpad +
+            0x72 => Some('-'),    // Numpad -
+            
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// Display the GPF stack browser (bottom half of screen: rows 12-24)
+unsafe fn gpf_browser_display() {
+    // Clear only bottom half (rows 12-24) - leave top half for timer display
+    vga_clear_rows(12, 25);
+    
+    // Compact header on row 12
+    vga_write_str(0, 12, b"*** GPF STACK BROWSER ***", VGA_ATTR_WHITE);
+    
+    // Fault info compact (rows 13-16)
+    vga_write_str(0, 13, b"EC:", VGA_ATTR_WHITE);
+    vga_write_hex32(3, 13, GPF_ERROR_CODE, VGA_ATTR_WHITE);
+    vga_write_str(12, 13, b"EIP:", VGA_ATTR_WHITE);
+    vga_write_hex32(16, 13, GPF_EIP, VGA_ATTR_WHITE);
+    vga_write_str(25, 13, b"CS:", VGA_ATTR_WHITE);
+    vga_write_hex16(28, 13, GPF_CS, VGA_ATTR_WHITE);
+    
+    vga_write_str(0, 14, b"EF:", VGA_ATTR_WHITE);
+    vga_write_hex32(3, 14, GPF_EFLAGS, VGA_ATTR_WHITE);
+    vga_write_str(12, 14, b"SS:", VGA_ATTR_WHITE);
+    vga_write_hex16(15, 14, GPF_SS, VGA_ATTR_WHITE);
+    vga_write_str(20, 14, b"ESP:", VGA_ATTR_WHITE);
+    vga_write_hex32(24, 14, GPF_ESP, VGA_ATTR_WHITE);
+    
+    // Stack browser info (rows 15-16)
+    vga_write_str(0, 15, b"Offset:", VGA_ATTR_WHITE);
+    vga_write_hex32(7, 15, GPF_STACK_OFFSET as u32, VGA_ATTR_GREEN);
+    let base_addr = GPF_ESP.wrapping_add(GPF_STACK_OFFSET as u32);
+    vga_write_str(20, 15, b"Base:", VGA_ATTR_WHITE);
+    vga_write_hex32(24, 15, base_addr, VGA_ATTR_GREEN);
+    
+    vga_write_str(0, 16, b"Controls: +/- shift, W/S step, Space/, page, ESC halt", VGA_ATTR_BLUE);
+    
+    // Stack dump - 8 rows of 32-bit values (4 values per row)
+    vga_write_str(0, 17, b"=== STACK DUMP (32-bit) ===", VGA_ATTR_BLUE);
+    
+    for row in 0..8 {
+        let addr = base_addr.wrapping_add((row * 4) as u32);
+        let y = 18 + row as usize;
+        
+        // Print address
+        vga_write_hex32(0, y, addr, VGA_ATTR_GREEN);
+        vga_write_str(8, y, b":", VGA_ATTR_WHITE);
+        
+        // Print 4 32-bit values per row
+        for col in 0..4 {
+            let val_addr = addr.wrapping_add((col * 4) as u32);
+            let val: u32;
+            core::arch::asm!("mov {}, [{}]", out(reg) val, in(reg) val_addr);
+            
+            let col_offset = 10 + (col * 10);
+            vga_write_hex32(col_offset, y, val, VGA_ATTR_WHITE);
+        }
+    }
 }
 
 #[no_mangle]

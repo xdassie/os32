@@ -8,8 +8,11 @@ BITS 32
 section .text align=4
 global _start
 global mb_header
+global ring3_task_counter
 extern rust_kernel_entry
 extern rust_kernel_irq
+extern validate_ring3_stack
+extern rust_gpf_handler
 
 %define VGA_ATTR       0x0F
 %define KERNEL_CS      0x08
@@ -627,7 +630,40 @@ IDT_HANDLER 9
 IDT_HANDLER 10
 IDT_HANDLER 11
 IDT_HANDLER 12
-IDT_HANDLER 13
+; Custom GPF handler - assembly wrapper passes params to Rust
+idt_handler_13:
+    cli
+    cld
+
+    mov esi, esp             ; Preserve original exception-frame ESP
+
+    ; CPU frame (exception occurs in ring 0, no privilege transition):
+    ; [esi +  0] = Error code
+    ; [esi +  4] = EIP (faulting)
+    ; [esi +  8] = CS
+    ; [esi + 12] = EFLAGS
+    ;
+    ; Note: If exception occurs during ring 3 -> ring 0 transition,
+    ; CPU additionally pushes [esi+16]=ESP and [esi+20]=SS
+
+    ; Push CDECL arguments right-to-left (all dword for consistent u32 sizing)
+    ; For ring 0 exceptions, ss/esp are 0 (no user context pushed)
+    ; Params: error_code, ss, esp, eflags, cs, eip
+
+    push dword [esi + 4]     ; eip (6th param, pushed first)
+    push dword [esi + 8]     ; cs (5th param)
+    push dword [esi + 12]    ; eflags (4th param)
+    push dword 0             ; esp (3rd param - 0 for ring 0 exception)
+    push dword 0             ; ss (2nd param - 0 for ring 0 exception)
+    push dword [esi]         ; error_code (1st param, pushed last)
+
+    ; Call Rust GPF handler (never returns)
+    call rust_gpf_handler
+
+    ; Should never reach here, but clean up and halt
+.halt:
+    hlt
+    jmp .halt
 IDT_HANDLER 14
 IDT_HANDLER 15
 IDT_HANDLER 16
@@ -731,6 +767,7 @@ setup_idt:
     IDT_GATE 10
     IDT_GATE 11
     IDT_GATE 12
+    ; GPF handler - use assembly wrapper that passes params to Rust
     IDT_GATE 13
     IDT_GATE 14
     IDT_GATE 15
@@ -842,9 +879,43 @@ kernel:
     int 0x3
     ; Continue after keypress
     sti
-.halt:
+
+    ; Validate stack setup for ring 3 transition before IRET
+    ; Pass ring3_stack_top as parameter to validate_ring3_stack()
+    ; This function will halt if validation fails
+    push dword ring3_stack_top   ; Parameter: ring 3 stack pointer
+    call validate_ring3_stack
+    add esp, 4                   ; Clean up parameter
+    
+    ; Launch ring 3 task by building IRET frame on kernel stack
+    ; This properly transitions from ring 0 to ring 3
+    push dword 0x23              ; User SS (0x20 | RPL 3)
+    push dword ring3_stack_top   ; User ESP
+    pushfd                       ; Push current EFLAGS
+    pop eax
+    or eax, 0x200                ; Ensure IF is set
+    push eax                     ; EFLAGS
+    push dword 0x1B              ; User CS (0x18 | RPL 3)
+    push dword ring3_task        ; User EIP
+    iret                         ; Transition to ring 3
+
+; Ring 3 task - runs in user mode, increments counter
+ring3_task:
+    ; This code runs in ring 3 (user mode)
+    ; Increment the shared counter
+    inc dword [ring3_task_counter]
+    ; Small delay to prevent counter overflow
+    mov ecx, 1000
+.ring3_delay:
+    dec ecx
+    jnz .ring3_delay
+    ; Loop forever (timer interrupts will still work)
+    jmp ring3_task
+
+; Return to ring 0 halt (unreachable, but for completeness)
+kernel_halt:
     hlt
-    jmp .halt
+    jmp kernel_halt
 
 ; ------------------------------------------------------------
 ; Read-only initialized data
@@ -910,6 +981,10 @@ ring0_stack_top:
 ring3_stack_bottom:
     resb 8192
 ring3_stack_top:
+
+; Ring 3 task counter - shared between ring 0 and ring 3
+ring3_task_counter:
+    resd 1
 
 ball_x:
     resw 1
