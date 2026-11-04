@@ -648,9 +648,10 @@ idt_handler_13:
 
     ; Push CDECL arguments right-to-left (all dword for consistent u32 sizing)
     ; For ring 0 exceptions, ss/esp are 0 (no user context pushed)
-    ; Params: error_code, ss, esp, eflags, cs, eip
+    ; Params: error_code, ss, esp, eflags, cs, eip, original_esp
 
-    push dword [esi + 4]     ; eip (6th param, pushed first)
+    push dword esi           ; original_esp (7th param, pushed first) - the exception frame ESP
+    push dword [esi + 4]     ; eip (6th param)
     push dword [esi + 8]     ; cs (5th param)
     push dword [esi + 12]    ; eflags (4th param)
     push dword 0             ; esp (3rd param - 0 for ring 0 exception)

@@ -11,6 +11,7 @@ const VGA_ROWS: usize = 25;
 const VGA_ATTR_WHITE: u8 = 0x0F;  // White on black
 const VGA_ATTR_GREEN: u8 = 0x0A;  // Light green on black
 const VGA_ATTR_BLUE: u8 = 0x0B;   // Light blue on black
+const VGA_ATTR_RED: u8 = 0x04;    // Light red on black
 
 // Moving display state
 static mut VGA_X: usize = 0;
@@ -36,15 +37,17 @@ static mut TSS_SS0: u16 = 0;         // Ring 0 stack selector from TSS
 
 // GPF Stack Browser state
 static mut GPF_ERROR_CODE: u32 = 0;
+static mut GPF_CR2: u32 = 0;
 static mut GPF_SS: u16 = 0;
 static mut GPF_ESP: u32 = 0;
 static mut GPF_EFLAGS: u32 = 0;
 static mut GPF_CS: u16 = 0;
 static mut GPF_EIP: u32 = 0;
 static mut GPF_STACK_OFFSET: i32 = 0;
+static mut GPF_ORIGINAL_ESP: u32 = 0;
 static mut IN_GPF_BROWSER: bool = false;
 
-/// Ring 3 task counter (shared with bootloader)
+// Ring 3 task counter (shared with bootloader)
 extern "C" {
     static ring3_task_counter: u32;
 }
@@ -530,7 +533,7 @@ pub extern "C" fn rust_kernel_entry() {
 }
 
 /// GPF (General Protection Fault) handler - vector 13 (0xD)
-/// Interactive stack browser that allows navigating the stack with keyboard
+/// Interactive stack browser with menu system
 #[no_mangle]
 pub extern "C" fn rust_gpf_handler(
     error_code: u32,
@@ -539,6 +542,7 @@ pub extern "C" fn rust_gpf_handler(
     eflags: u32,
     cs: u16,
     eip: u32,
+    original_esp: u32,
 ) {
     // Store fault state in statics for the browser
     unsafe {
@@ -548,8 +552,14 @@ pub extern "C" fn rust_gpf_handler(
         GPF_EFLAGS = eflags;
         GPF_CS = cs;
         GPF_EIP = eip;
+        GPF_ORIGINAL_ESP = original_esp;
         GPF_STACK_OFFSET = 0;
         IN_GPF_BROWSER = true;
+        
+        // Read CR2 (faulting linear address)
+        let cr2_val: u32;
+        core::arch::asm!("mov {0}, cr2", out(reg) cr2_val);
+        GPF_CR2 = cr2_val;
     }
 
     // Initial display
@@ -566,8 +576,55 @@ pub extern "C" fn rust_gpf_handler(
             // Poll keyboard
             if let Some(key) = poll_keyboard_key() {
                 match key {
-                    '\x1B' => { /* ESC - could exit/reboot */ }
-                    '\n' | '\r' => { /* Enter - could do something */ }
+                    'm' | 'M' => {
+                        // Show menu
+                        gpf_show_menu();
+                    }
+                    '1' => {
+                        // Disable interrupts
+                        core::arch::asm!("cli");
+                        gpf_print_status(b"Interrupts DISABLED", VGA_ATTR_RED);
+                    }
+                    '2' => {
+                        // Enable interrupts
+                        core::arch::asm!("sti");
+                        gpf_print_status(b"Interrupts ENABLED", VGA_ATTR_GREEN);
+                    }
+                    '3' => {
+                        // Print all CPU registers to VGA
+                        gpf_print_registers_vga();
+                    }
+                    '4' => {
+                        // Print all CPU registers to serial
+                        gpf_print_registers_serial();
+                    }
+                    '5' => {
+                        // Print stack dump to serial
+                        gpf_print_stack_serial();
+                    }
+                    '6' => {
+                        // Halt CPU
+                        gpf_print_status(b"HALTING CPU...", VGA_ATTR_RED);
+                        core::arch::asm!("hlt");
+                    }
+                    '7' => {
+                        // Print GPF fault info to serial
+                        gpf_print_info_serial();
+                    }
+                    'r' | 'R' => {
+                        // Reset stack offset
+                        GPF_STACK_OFFSET = 0;
+                        gpf_browser_display();
+                    }
+                    '\x1B' => {
+                        // ESC - halt
+                        gpf_print_status(b"ESC pressed - HALTING", VGA_ATTR_RED);
+                        core::arch::asm!("hlt");
+                    }
+                    '\n' | '\r' => {
+                        // Enter - refresh display
+                        gpf_browser_display();
+                    }
                     '+' | '=' => {
                         GPF_STACK_OFFSET = GPF_STACK_OFFSET.wrapping_add(4);
                         gpf_browser_display();
@@ -576,7 +633,7 @@ pub extern "C" fn rust_gpf_handler(
                         GPF_STACK_OFFSET = GPF_STACK_OFFSET.wrapping_sub(4);
                         gpf_browser_display();
                     }
-                    'w' | 'W' | '\x5D' => { /* Up arrow (0x5D is up scancode) */
+                    'w' | 'W' => {
                         GPF_STACK_OFFSET = GPF_STACK_OFFSET.wrapping_sub(4);
                         gpf_browser_display();
                     }
@@ -584,11 +641,11 @@ pub extern "C" fn rust_gpf_handler(
                         GPF_STACK_OFFSET = GPF_STACK_OFFSET.wrapping_add(4);
                         gpf_browser_display();
                     }
-                    ' ' => { /* Space - page down (+16) */
+                    ' ' => {
                         GPF_STACK_OFFSET = GPF_STACK_OFFSET.wrapping_add(16);
                         gpf_browser_display();
                     }
-                    ',' => { /* Comma - page up (-16) */
+                    ',' => {
                         GPF_STACK_OFFSET = GPF_STACK_OFFSET.wrapping_sub(16);
                         gpf_browser_display();
                     }
@@ -722,11 +779,11 @@ unsafe fn gpf_browser_display() {
     // Stack browser info (rows 15-16)
     vga_write_str(0, 15, b"Offset:", VGA_ATTR_WHITE);
     vga_write_hex32(7, 15, GPF_STACK_OFFSET as u32, VGA_ATTR_GREEN);
-    let base_addr = GPF_ESP.wrapping_add(GPF_STACK_OFFSET as u32);
+    let base_addr = GPF_ORIGINAL_ESP.wrapping_add(GPF_STACK_OFFSET as u32);
     vga_write_str(20, 15, b"Base:", VGA_ATTR_WHITE);
     vga_write_hex32(24, 15, base_addr, VGA_ATTR_GREEN);
     
-    vga_write_str(0, 16, b"Controls: +/- shift, W/S step, Space/, page, ESC halt", VGA_ATTR_BLUE);
+    vga_write_str(0, 16, b"M=menu 1/2=INT 3/4=regs 5=stack 6=halt", VGA_ATTR_BLUE);
     
     // Stack dump - 8 rows of 32-bit values (4 values per row)
     vga_write_str(0, 17, b"=== STACK DUMP (32-bit) ===", VGA_ATTR_BLUE);
@@ -749,6 +806,463 @@ unsafe fn gpf_browser_display() {
             vga_write_hex32(col_offset, y, val, VGA_ATTR_WHITE);
         }
     }
+}
+
+/// Show GPF menu on top half of screen
+unsafe fn gpf_show_menu() {
+    // Clear top half and show menu
+    vga_clear_rows(0, 12);
+    
+    vga_write_str(0, 0, b"========== GPF MENU ==========", VGA_ATTR_BLUE);
+    vga_write_str(0, 2, b"1 - Disable Interrupts (CLI)", VGA_ATTR_WHITE);
+    vga_write_str(0, 3, b"2 - Enable Interrupts (STI)", VGA_ATTR_WHITE);
+    vga_write_str(0, 4, b"3 - Print Registers to VGA", VGA_ATTR_WHITE);
+    vga_write_str(0, 5, b"4 - Print Registers to Serial", VGA_ATTR_WHITE);
+    vga_write_str(0, 6, b"5 - Print Stack to Serial", VGA_ATTR_WHITE);
+    vga_write_str(0, 7, b"6 - Halt CPU", VGA_ATTR_WHITE);
+    vga_write_str(0, 8, b"7 - Print GPF Info to Serial", VGA_ATTR_WHITE);
+    vga_write_str(0, 9, b"", VGA_ATTR_WHITE);
+    vga_write_str(0, 9, b"Press M to return to menu", VGA_ATTR_GREEN);
+    vga_write_str(0, 10, b"Press any other key to continue", VGA_ATTR_GREEN);
+    
+    // Wait for key press
+    loop {
+        if poll_keyboard_key().is_some() {
+            break;
+        }
+        core::arch::asm!("pause");
+    }
+    
+    // Restore browser display
+    gpf_browser_display();
+}
+
+/// Print status message at row 11
+unsafe fn gpf_print_status(msg: &[u8], attr: u8) {
+    vga_write_str(0, 11, msg, attr);
+}
+
+/// Print all CPU registers to VGA display
+unsafe fn gpf_print_registers_vga() {
+    vga_clear_rows(0, 12);
+    
+    // Get registers using simpler approach
+    let (eax, ebx, ecx, edx): (u32, u32, u32, u32);
+    core::arch::asm!(
+        "mov {0}, eax",
+        "mov {1}, ebx", 
+        "mov {2}, ecx",
+        "mov {3}, edx",
+        out(reg) eax,
+        out(reg) ebx,
+        out(reg) ecx,
+        out(reg) edx
+    );
+    
+    let (esi, edi, ebp, esp): (u32, u32, u32, u32);
+    core::arch::asm!(
+        "mov {0}, esi",
+        "mov {1}, edi",
+        "mov {2}, ebp",
+        "mov {3}, esp",
+        out(reg) esi,
+        out(reg) edi,
+        out(reg) ebp,
+        out(reg) esp
+    );
+    
+    let eflags: u32;
+    core::arch::asm!(
+        "pushfd",
+        "pop {0}",
+        out(reg) eflags
+    );
+    
+    // EIP approximation - current function address
+    let eip: u32 = gpf_print_registers_vga as u32;
+    
+    vga_write_str(0, 0, b"=== CPU REGISTERS ===", VGA_ATTR_BLUE);
+    
+    vga_write_str(0, 2, b"EAX:", VGA_ATTR_WHITE);
+    vga_write_hex32(4, 2, eax, VGA_ATTR_GREEN);
+    vga_write_str(0, 3, b"EBX:", VGA_ATTR_WHITE);
+    vga_write_hex32(4, 3, ebx, VGA_ATTR_GREEN);
+    vga_write_str(0, 4, b"ECX:", VGA_ATTR_WHITE);
+    vga_write_hex32(4, 4, ecx, VGA_ATTR_GREEN);
+    vga_write_str(0, 5, b"EDX:", VGA_ATTR_WHITE);
+    vga_write_hex32(4, 5, edx, VGA_ATTR_GREEN);
+    
+    vga_write_str(0, 6, b"ESI:", VGA_ATTR_WHITE);
+    vga_write_hex32(4, 6, esi, VGA_ATTR_GREEN);
+    vga_write_str(0, 7, b"EDI:", VGA_ATTR_WHITE);
+    vga_write_hex32(4, 7, edi, VGA_ATTR_GREEN);
+    vga_write_str(0, 8, b"EBP:", VGA_ATTR_WHITE);
+    vga_write_hex32(4, 8, ebp, VGA_ATTR_GREEN);
+    vga_write_str(0, 9, b"EIP:", VGA_ATTR_WHITE);
+    vga_write_hex32(4, 9, eip, VGA_ATTR_GREEN);
+    
+    vga_write_str(0, 10, b"EFLAGS:", VGA_ATTR_WHITE);
+    vga_write_hex32(7, 10, eflags, VGA_ATTR_GREEN);
+    
+    vga_write_str(0, 11, b"Press M for menu", VGA_ATTR_BLUE);
+    
+    // Wait for key
+    loop {
+        if poll_keyboard_key().is_some() {
+            break;
+        }
+        core::arch::asm!("pause");
+    }
+    
+    gpf_browser_display();
+}
+
+/// Print all CPU registers to serial port
+/// Print GPF fault info to serial port (error code, CR2, EIP/CS, SS/ESP, EFLAGS)
+unsafe fn gpf_print_info_serial() {
+    let mut uart = match Uart16550::new_port(0x3F8) {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    uart.init(Config::default()).ok();
+    
+    uart.send_bytes_exact(b"\r\n=== GPF FAULT INFO ===\r\n");
+    
+    // Error Code
+    uart.send_bytes_exact(b"Error Code:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((GPF_ERROR_CODE >> 28) & 0xF) as u8),
+        to_hex_digit(((GPF_ERROR_CODE >> 24) & 0xF) as u8),
+        to_hex_digit(((GPF_ERROR_CODE >> 20) & 0xF) as u8),
+        to_hex_digit(((GPF_ERROR_CODE >> 16) & 0xF) as u8),
+        to_hex_digit(((GPF_ERROR_CODE >> 12) & 0xF) as u8),
+        to_hex_digit(((GPF_ERROR_CODE >> 8) & 0xF) as u8),
+        to_hex_digit(((GPF_ERROR_CODE >> 4) & 0xF) as u8),
+        to_hex_digit((GPF_ERROR_CODE & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // CR2 (faulting linear address)
+    uart.send_bytes_exact(b"CR2:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((GPF_CR2 >> 28) & 0xF) as u8),
+        to_hex_digit(((GPF_CR2 >> 24) & 0xF) as u8),
+        to_hex_digit(((GPF_CR2 >> 20) & 0xF) as u8),
+        to_hex_digit(((GPF_CR2 >> 16) & 0xF) as u8),
+        to_hex_digit(((GPF_CR2 >> 12) & 0xF) as u8),
+        to_hex_digit(((GPF_CR2 >> 8) & 0xF) as u8),
+        to_hex_digit(((GPF_CR2 >> 4) & 0xF) as u8),
+        to_hex_digit((GPF_CR2 & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // EIP
+    uart.send_bytes_exact(b"EIP:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((GPF_EIP >> 28) & 0xF) as u8),
+        to_hex_digit(((GPF_EIP >> 24) & 0xF) as u8),
+        to_hex_digit(((GPF_EIP >> 20) & 0xF) as u8),
+        to_hex_digit(((GPF_EIP >> 16) & 0xF) as u8),
+        to_hex_digit(((GPF_EIP >> 12) & 0xF) as u8),
+        to_hex_digit(((GPF_EIP >> 8) & 0xF) as u8),
+        to_hex_digit(((GPF_EIP >> 4) & 0xF) as u8),
+        to_hex_digit((GPF_EIP & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // CS
+    uart.send_bytes_exact(b"CS:");
+    let digits: [u8; 4] = [
+        to_hex_digit(((GPF_CS >> 12) & 0xF) as u8),
+        to_hex_digit(((GPF_CS >> 8) & 0xF) as u8),
+        to_hex_digit(((GPF_CS >> 4) & 0xF) as u8),
+        to_hex_digit((GPF_CS & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // SS
+    uart.send_bytes_exact(b"SS:");
+    let digits: [u8; 4] = [
+        to_hex_digit(((GPF_SS >> 12) & 0xF) as u8),
+        to_hex_digit(((GPF_SS >> 8) & 0xF) as u8),
+        to_hex_digit(((GPF_SS >> 4) & 0xF) as u8),
+        to_hex_digit((GPF_SS & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // ESP
+    uart.send_bytes_exact(b"ESP:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((GPF_ESP >> 28) & 0xF) as u8),
+        to_hex_digit(((GPF_ESP >> 24) & 0xF) as u8),
+        to_hex_digit(((GPF_ESP >> 20) & 0xF) as u8),
+        to_hex_digit(((GPF_ESP >> 16) & 0xF) as u8),
+        to_hex_digit(((GPF_ESP >> 12) & 0xF) as u8),
+        to_hex_digit(((GPF_ESP >> 8) & 0xF) as u8),
+        to_hex_digit(((GPF_ESP >> 4) & 0xF) as u8),
+        to_hex_digit((GPF_ESP & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // EFLAGS
+    uart.send_bytes_exact(b"EFLAGS:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((GPF_EFLAGS >> 28) & 0xF) as u8),
+        to_hex_digit(((GPF_EFLAGS >> 24) & 0xF) as u8),
+        to_hex_digit(((GPF_EFLAGS >> 20) & 0xF) as u8),
+        to_hex_digit(((GPF_EFLAGS >> 16) & 0xF) as u8),
+        to_hex_digit(((GPF_EFLAGS >> 12) & 0xF) as u8),
+        to_hex_digit(((GPF_EFLAGS >> 8) & 0xF) as u8),
+        to_hex_digit(((GPF_EFLAGS >> 4) & 0xF) as u8),
+        to_hex_digit((GPF_EFLAGS & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // Show confirmation on VGA
+    gpf_print_status(b"GPF info sent to serial", VGA_ATTR_GREEN);
+}
+
+unsafe fn gpf_print_registers_serial() {
+    let mut uart = match Uart16550::new_port(0x3F8) {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    uart.init(Config::default()).ok();
+    
+    // Get registers in smaller batches
+    let (eax, ebx, ecx, edx): (u32, u32, u32, u32);
+    core::arch::asm!(
+        "mov {0}, eax",
+        "mov {1}, ebx",
+        "mov {2}, ecx",
+        "mov {3}, edx",
+        out(reg) eax,
+        out(reg) ebx,
+        out(reg) ecx,
+        out(reg) edx
+    );
+    
+    let (esi, edi, ebp, esp): (u32, u32, u32, u32);
+    core::arch::asm!(
+        "mov {0}, esi",
+        "mov {1}, edi",
+        "mov {2}, ebp",
+        "mov {3}, esp",
+        out(reg) esi,
+        out(reg) edi,
+        out(reg) ebp,
+        out(reg) esp
+    );
+    
+    let eflags: u32;
+    core::arch::asm!(
+        "pushfd",
+        "pop {0}",
+        out(reg) eflags
+    );
+    
+    uart.send_bytes_exact(b"\r\n=== CPU REGISTERS ===\r\n");
+    
+    // EAX
+    uart.send_bytes_exact(b"EAX:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((eax >> 28) & 0xF) as u8),
+        to_hex_digit(((eax >> 24) & 0xF) as u8),
+        to_hex_digit(((eax >> 20) & 0xF) as u8),
+        to_hex_digit(((eax >> 16) & 0xF) as u8),
+        to_hex_digit(((eax >> 12) & 0xF) as u8),
+        to_hex_digit(((eax >> 8) & 0xF) as u8),
+        to_hex_digit(((eax >> 4) & 0xF) as u8),
+        to_hex_digit((eax & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // EBX
+    uart.send_bytes_exact(b"EBX:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((ebx >> 28) & 0xF) as u8),
+        to_hex_digit(((ebx >> 24) & 0xF) as u8),
+        to_hex_digit(((ebx >> 20) & 0xF) as u8),
+        to_hex_digit(((ebx >> 16) & 0xF) as u8),
+        to_hex_digit(((ebx >> 12) & 0xF) as u8),
+        to_hex_digit(((ebx >> 8) & 0xF) as u8),
+        to_hex_digit(((ebx >> 4) & 0xF) as u8),
+        to_hex_digit((ebx & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // ECX
+    uart.send_bytes_exact(b"ECX:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((ecx >> 28) & 0xF) as u8),
+        to_hex_digit(((ecx >> 24) & 0xF) as u8),
+        to_hex_digit(((ecx >> 20) & 0xF) as u8),
+        to_hex_digit(((ecx >> 16) & 0xF) as u8),
+        to_hex_digit(((ecx >> 12) & 0xF) as u8),
+        to_hex_digit(((ecx >> 8) & 0xF) as u8),
+        to_hex_digit(((ecx >> 4) & 0xF) as u8),
+        to_hex_digit((ecx & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // EDX
+    uart.send_bytes_exact(b"EDX:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((edx >> 28) & 0xF) as u8),
+        to_hex_digit(((edx >> 24) & 0xF) as u8),
+        to_hex_digit(((edx >> 20) & 0xF) as u8),
+        to_hex_digit(((edx >> 16) & 0xF) as u8),
+        to_hex_digit(((edx >> 12) & 0xF) as u8),
+        to_hex_digit(((edx >> 8) & 0xF) as u8),
+        to_hex_digit(((edx >> 4) & 0xF) as u8),
+        to_hex_digit((edx & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // ESI
+    uart.send_bytes_exact(b"ESI:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((esi >> 28) & 0xF) as u8),
+        to_hex_digit(((esi >> 24) & 0xF) as u8),
+        to_hex_digit(((esi >> 20) & 0xF) as u8),
+        to_hex_digit(((esi >> 16) & 0xF) as u8),
+        to_hex_digit(((esi >> 12) & 0xF) as u8),
+        to_hex_digit(((esi >> 8) & 0xF) as u8),
+        to_hex_digit(((esi >> 4) & 0xF) as u8),
+        to_hex_digit((esi & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // EDI
+    uart.send_bytes_exact(b"EDI:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((edi >> 28) & 0xF) as u8),
+        to_hex_digit(((edi >> 24) & 0xF) as u8),
+        to_hex_digit(((edi >> 20) & 0xF) as u8),
+        to_hex_digit(((edi >> 16) & 0xF) as u8),
+        to_hex_digit(((edi >> 12) & 0xF) as u8),
+        to_hex_digit(((edi >> 8) & 0xF) as u8),
+        to_hex_digit(((edi >> 4) & 0xF) as u8),
+        to_hex_digit((edi & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // EBP
+    uart.send_bytes_exact(b"EBP:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((ebp >> 28) & 0xF) as u8),
+        to_hex_digit(((ebp >> 24) & 0xF) as u8),
+        to_hex_digit(((ebp >> 20) & 0xF) as u8),
+        to_hex_digit(((ebp >> 16) & 0xF) as u8),
+        to_hex_digit(((ebp >> 12) & 0xF) as u8),
+        to_hex_digit(((ebp >> 8) & 0xF) as u8),
+        to_hex_digit(((ebp >> 4) & 0xF) as u8),
+        to_hex_digit((ebp & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // ESP
+    uart.send_bytes_exact(b"ESP:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((esp >> 28) & 0xF) as u8),
+        to_hex_digit(((esp >> 24) & 0xF) as u8),
+        to_hex_digit(((esp >> 20) & 0xF) as u8),
+        to_hex_digit(((esp >> 16) & 0xF) as u8),
+        to_hex_digit(((esp >> 12) & 0xF) as u8),
+        to_hex_digit(((esp >> 8) & 0xF) as u8),
+        to_hex_digit(((esp >> 4) & 0xF) as u8),
+        to_hex_digit((esp & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // EFLAGS
+    uart.send_bytes_exact(b"EFLAGS:");
+    let digits: [u8; 8] = [
+        to_hex_digit(((eflags >> 28) & 0xF) as u8),
+        to_hex_digit(((eflags >> 24) & 0xF) as u8),
+        to_hex_digit(((eflags >> 20) & 0xF) as u8),
+        to_hex_digit(((eflags >> 16) & 0xF) as u8),
+        to_hex_digit(((eflags >> 12) & 0xF) as u8),
+        to_hex_digit(((eflags >> 8) & 0xF) as u8),
+        to_hex_digit(((eflags >> 4) & 0xF) as u8),
+        to_hex_digit((eflags & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // Show confirmation on VGA
+    gpf_print_status(b"Registers sent to serial", VGA_ATTR_GREEN);
+}
+
+/// Print stack dump to serial port
+unsafe fn gpf_print_stack_serial() {
+    let mut uart = match Uart16550::new_port(0x3F8) {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    uart.init(Config::default()).ok();
+    
+    uart.send_bytes_exact(b"\r\n=== STACK DUMP ===\r\n");
+    
+    let base_addr = GPF_ORIGINAL_ESP.wrapping_add(GPF_STACK_OFFSET as u32);
+    
+    for row in 0..8 {
+        let addr = base_addr.wrapping_add((row * 16) as u32);
+        
+        // Print address
+        uart.send_bytes_exact(b"ADDR:");
+        let digits: [u8; 8] = [
+            to_hex_digit(((addr >> 28) & 0xF) as u8),
+            to_hex_digit(((addr >> 24) & 0xF) as u8),
+            to_hex_digit(((addr >> 20) & 0xF) as u8),
+            to_hex_digit(((addr >> 16) & 0xF) as u8),
+            to_hex_digit(((addr >> 12) & 0xF) as u8),
+            to_hex_digit(((addr >> 8) & 0xF) as u8),
+            to_hex_digit(((addr >> 4) & 0xF) as u8),
+            to_hex_digit((addr & 0xF) as u8),
+        ];
+        uart.send_bytes_exact(&digits);
+        uart.send_bytes_exact(b"  ");
+        
+        // Print 4 32-bit values
+        for col in 0..4 {
+            let val_addr = addr.wrapping_add((col * 4) as u32);
+            let val: u32;
+            core::arch::asm!("mov {}, [{}]", out(reg) val, in(reg) val_addr);
+            
+            let digits: [u8; 8] = [
+                to_hex_digit(((val >> 28) & 0xF) as u8),
+                to_hex_digit(((val >> 24) & 0xF) as u8),
+                to_hex_digit(((val >> 20) & 0xF) as u8),
+                to_hex_digit(((val >> 16) & 0xF) as u8),
+                to_hex_digit(((val >> 12) & 0xF) as u8),
+                to_hex_digit(((val >> 8) & 0xF) as u8),
+                to_hex_digit(((val >> 4) & 0xF) as u8),
+                to_hex_digit((val & 0xF) as u8),
+            ];
+            uart.send_bytes_exact(&digits);
+            uart.send_bytes_exact(b" ");
+        }
+        uart.send_bytes_exact(b"\r\n");
+    }
+    
+    // Show confirmation on VGA
+    gpf_print_status(b"Stack dump sent to serial", VGA_ATTR_GREEN);
 }
 
 #[no_mangle]

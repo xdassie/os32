@@ -10,5 +10,5 @@
   "linker": "ld.lld",
   "panic-strategy": "abort",
   "disable-redzone": true,
-  "features": "+mmx,+sse,+sse2"
+  "features": "-mmx,-sse,-sse2"
 }
