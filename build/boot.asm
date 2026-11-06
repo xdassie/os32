@@ -956,8 +956,8 @@ gdt_table:
     dq 0x0000000000000000  ; 0x00: Null descriptor
     dq 0x00CF9A000000FFFF  ; 0x08: flat ring 0 code
     dq 0x00CF92000000FFFF  ; 0x10: flat ring 0 data
-    dq 0x00CFFFFA0000FFFF  ; 0x18: flat ring 3 code
-    dq 0x00CFFFF20000FFFF  ; 0x20: flat ring 3 data
+    dq 0x00CFFA000000FFFF  ; 0x18: flat ring 3 code
+    dq 0x00CFF2000000FFFF  ; 0x20: flat ring 3 data
     ; 0x28: TSS descriptor - will be filled in at runtime
     dd 0x00000000          ; TSS low 32 bits (limit + base[0:23])
     dd 0x00000000          ; TSS high 32 bits (access + flags + base[24:31])

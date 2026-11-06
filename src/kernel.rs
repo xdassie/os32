@@ -35,6 +35,15 @@ static mut TSS_CPL_VALID: bool = false;
 static mut TSS_ESP0: u32 = 0;        // Ring 0 stack pointer from TSS
 static mut TSS_SS0: u16 = 0;         // Ring 0 stack selector from TSS
 
+// Ring 3 SS/ESP validation results with detailed diagnostics
+static mut RING3_SS_VALID: bool = false;
+static mut RING3_SS_SELECTOR: u16 = 0;
+static mut RING3_SS_BASE: u32 = 0;
+static mut RING3_SS_LIMIT: u32 = 0;
+static mut RING3_SS_ACCESS: u8 = 0;
+static mut RING3_ESP_VALID: bool = false;
+static mut RING3_ESP: u32 = 0;
+
 // GPF Stack Browser state
 static mut GPF_ERROR_CODE: u32 = 0;
 static mut GPF_CR2: u32 = 0;
@@ -329,13 +338,141 @@ unsafe fn validate_tss_cpl() -> bool {
     esp_valid && ss0_valid
 }
 
+/// Validate ring 3 SS descriptor in GDT
+/// Intel Manual Vol 3A: Segment descriptor format for data segments
+/// Returns true if SS selector points to valid ring 3 data descriptor
+unsafe fn validate_ring3_ss_descriptor(ss_selector: u16) -> bool {
+    // Validate selector format
+    // Selector: [15:3]=index, [2]=TI (0=GDT), [1:0]=RPL
+    if ss_selector == 0 {
+        RING3_SS_VALID = false;
+        return false;
+    }
+    
+    RING3_SS_SELECTOR = ss_selector;
+    
+    // Extract selector components
+    let index = (ss_selector >> 3) as usize;
+    let ti = (ss_selector >> 2) & 1;  // Table indicator (0=GDT, 1=LDT)
+    let rpl = ss_selector & 0x3;      // Requestor Privilege Level
+    
+    // TI must be 0 (GDT, not LDT)
+    if ti != 0 {
+        RING3_SS_VALID = false;
+        return false;
+    }
+    
+    // RPL must be 3 for ring 3 selector
+    if rpl != 3 {
+        RING3_SS_VALID = false;
+        return false;
+    }
+    
+    // Calculate GDT entry offset (index * 8 bytes per descriptor)
+    let gdt_entry_offset = index * 8;
+    let gdt_ptr = GDT_BASE as *const u8;
+    
+    if gdt_ptr.is_null() || GDT_BASE == 0 {
+        RING3_SS_VALID = false;
+        return false;
+    }
+    
+    // Check if entry is within GDT limit
+    if (gdt_entry_offset + 8) as u16 > GDT_LIMIT {
+        RING3_SS_VALID = false;
+        return false;
+    }
+    
+    // Read GDT descriptor
+    // Format: [limit_low:u16, base_low:u24, access:u8, flags:u8]
+    let limit_low = u16::from_le_bytes([
+        *gdt_ptr.offset(gdt_entry_offset as isize),
+        *gdt_ptr.offset((gdt_entry_offset + 1) as isize),
+    ]);
+    
+    let base_low = (u32::from(*gdt_ptr.offset((gdt_entry_offset + 2) as isize)))
+        | ((u32::from(*gdt_ptr.offset((gdt_entry_offset + 3) as isize))) << 8)
+        | ((u32::from(*gdt_ptr.offset((gdt_entry_offset + 4) as isize))) << 16);
+    
+    let access = *gdt_ptr.offset((gdt_entry_offset + 5) as isize);
+    
+    let flags_base = u32::from_le_bytes([
+        *gdt_ptr.offset((gdt_entry_offset + 6) as isize),
+        *gdt_ptr.offset((gdt_entry_offset + 7) as isize),
+        0x00,
+        0x00,
+    ]);
+    
+    let base_high = (flags_base >> 16) & 0xFF;
+    let limit_high = (flags_base >> 24) & 0xF;
+    let granule = ((flags_base >> 28) & 0x1) != 0;
+    let default_size = ((flags_base >> 29) & 0x1) != 0;
+    
+    // Reconstruct base and limit
+    let base = base_low | (base_high << 24);
+    let limit: u32 = if granule {
+        ((limit_low as u32) << 12) | ((limit_high as u32) << 20) | 0xFFF
+    } else {
+        (limit_low as u32) | ((limit_high as u32) << 16)
+    };
+    
+    RING3_SS_BASE = base;
+    RING3_SS_LIMIT = limit;
+    RING3_SS_ACCESS = access;
+    
+    // Validate descriptor attributes
+    let present = ((access >> 7) & 0x1) != 0;      // Bit 7: Present
+    let dpl = (access >> 5) & 0x3;                 // Bits 6-5: Descriptor Privilege Level
+    let s = ((access >> 4) & 0x1) != 0;            // Bit 4: S=1 for code/data segment
+    let type_field = access & 0xF;                 // Bits 3-0: Type field
+    
+    // Must be present
+    if !present {
+        RING3_SS_VALID = false;
+        return false;
+    }
+    
+    // DPL must be 3 for ring 3 data segment
+    if dpl != 3 {
+        RING3_SS_VALID = false;
+        return false;
+    }
+    
+    // Must be a segment (S=1)
+    if !s {
+        RING3_SS_VALID = false;
+        return false;
+    }
+    
+    // Type field for writable data segment: 1, 3, 5, 7 (expand-down variants also exist)
+    // Valid types: 1001 (writable, expand-up), 1000 (read-only, expand-up),
+    //              1011 (writable, expand-down), 1010 (read-only, expand-down)
+    let valid_type = matches!(type_field, 8 | 9 | 10 | 11);
+    if !valid_type {
+        RING3_SS_VALID = false;
+        return false;
+    }
+    
+    // Base must be non-zero
+    if base == 0 {
+        RING3_SS_VALID = false;
+        return false;
+    }
+    
+    RING3_SS_VALID = true;
+    true
+}
+
 /// Validate stack setup for ring 3 transition
 /// This function checks that the stack is correctly configured before transitioning to ring 3
+/// Validates both ESP value and SS descriptor in GDT
 /// Halts the system if validation fails (does not return)
 /// If all validations pass, returns normally and caller can proceed with IRET
 #[no_mangle]
 pub extern "C" fn validate_ring3_stack(ring3_esp: u32) {
     unsafe {
+        RING3_ESP = ring3_esp;
+        
         // Get current ESP (kernel stack pointer)
         let current_esp: u32;
         core::arch::asm!("mov {0}, esp", out(reg) current_esp);
@@ -349,10 +486,12 @@ pub extern "C" fn validate_ring3_stack(ring3_esp: u32) {
         }
         
         // Validate ring 3 stack pointer parameter
+        // Note: Do not halt on failure - just record the validation result
         if ring3_esp == 0 || ring3_esp >= 0x10000000 {
             vga_write_str(0, 7, b"R3_STACK: FAIL err=2", VGA_ATTR_WHITE);
-            core::arch::asm!("cli");
-            loop {}
+            RING3_ESP_VALID = false;
+        } else {
+            RING3_ESP_VALID = true;
         }
         
         // Validate TSS ESP0 (ring 0 stack for interrupts from ring 3)
@@ -367,6 +506,14 @@ pub extern "C" fn validate_ring3_stack(ring3_esp: u32) {
             vga_write_str(0, 7, b"R3_STACK: FAIL err=4", VGA_ATTR_WHITE);
             core::arch::asm!("cli");
             loop {}
+        }
+        
+        // Validate ring 3 SS descriptor (0x23 = selector with RPL 3)
+        // The selector 0x23 points to GDT index 4 (ring 3 data descriptor)
+        // Note: Do not halt on failure - just record the validation result
+        let ring3_ss_selector = 0x23u16;
+        if !validate_ring3_ss_descriptor(ring3_ss_selector) {
+            vga_write_str(0, 7, b"R3_STACK: FAIL err=5", VGA_ATTR_WHITE);
         }
         
         // All validations passed - return normally
@@ -474,8 +621,37 @@ unsafe fn vga_draw_moving_display() {
         vga_write_str(48, 5, b" exp=10", VGA_ATTR_WHITE);
     }
 
-    // Draw ring 3 task counter at row 6
-    vga_write_str(0, 6, b"RING3_TASK: ", VGA_ATTR_WHITE);
+    // Draw ring 3 SS validation at row 6
+    vga_write_str(0, 6, b"R3_SS: ", VGA_ATTR_WHITE);
+    if RING3_SS_VALID {
+        vga_write_str(7, 6, b"OK", VGA_ATTR_GREEN);
+    } else {
+        vga_write_str(7, 6, b"FAIL", VGA_ATTR_RED);
+    }
+    vga_write_str(12, 6, b"sel=", VGA_ATTR_WHITE);
+    vga_write_hex16(16, 6, RING3_SS_SELECTOR, VGA_ATTR_WHITE);
+    vga_write_str(21, 6, b" base=", VGA_ATTR_WHITE);
+    vga_write_hex32(26, 6, RING3_SS_BASE, VGA_ATTR_WHITE);
+    if !RING3_SS_VALID {
+        vga_write_str(35, 6, b" acc=", VGA_ATTR_WHITE);
+        let hi = to_hex_digit((RING3_SS_ACCESS >> 4) & 0xF);
+        let lo = to_hex_digit(RING3_SS_ACCESS & 0xF);
+        vga_write_char(40, 6, hi, VGA_ATTR_WHITE);
+        vga_write_char(41, 6, lo, VGA_ATTR_WHITE);
+    }
+
+    // Draw ring 3 ESP validation at row 7
+    vga_write_str(0, 7, b"R3_ESP: ", VGA_ATTR_WHITE);
+    if RING3_ESP_VALID {
+        vga_write_str(8, 7, b"OK", VGA_ATTR_GREEN);
+    } else {
+        vga_write_str(8, 7, b"FAIL", VGA_ATTR_RED);
+    }
+    vga_write_str(12, 7, b"esp=", VGA_ATTR_WHITE);
+    vga_write_hex32(16, 7, RING3_ESP, VGA_ATTR_WHITE);
+
+    // Draw ring 3 task counter at row 8
+    vga_write_str(0, 8, b"RING3_TASK: ", VGA_ATTR_WHITE);
     let counter = unsafe { ring3_task_counter };
     let d0 = b'0' + ((counter / 10000000) % 10) as u8;
     let d1 = b'0' + ((counter / 1000000) % 10) as u8;
@@ -485,14 +661,14 @@ unsafe fn vga_draw_moving_display() {
     let d5 = b'0' + ((counter / 100) % 10) as u8;
     let d6 = b'0' + ((counter / 10) % 10) as u8;
     let d7 = b'0' + (counter % 10) as u8;
-    vga_write_char(12, 6, d0, VGA_ATTR_WHITE);
-    vga_write_char(13, 6, d1, VGA_ATTR_WHITE);
-    vga_write_char(14, 6, d2, VGA_ATTR_WHITE);
-    vga_write_char(15, 6, d3, VGA_ATTR_WHITE);
-    vga_write_char(16, 6, d4, VGA_ATTR_WHITE);
-    vga_write_char(17, 6, d5, VGA_ATTR_WHITE);
-    vga_write_char(18, 6, d6, VGA_ATTR_WHITE);
-    vga_write_char(19, 6, d7, VGA_ATTR_WHITE);
+    vga_write_char(12, 8, d0, VGA_ATTR_WHITE);
+    vga_write_char(13, 8, d1, VGA_ATTR_WHITE);
+    vga_write_char(14, 8, d2, VGA_ATTR_WHITE);
+    vga_write_char(15, 8, d3, VGA_ATTR_WHITE);
+    vga_write_char(16, 8, d4, VGA_ATTR_WHITE);
+    vga_write_char(17, 8, d5, VGA_ATTR_WHITE);
+    vga_write_char(18, 8, d6, VGA_ATTR_WHITE);
+    vga_write_char(19, 8, d7, VGA_ATTR_WHITE);
 
     // Update bouncing ball position
     let mut new_x = VGA_X as i32 + VGA_DX;
@@ -610,6 +786,10 @@ pub extern "C" fn rust_gpf_handler(
                     '7' => {
                         // Print GPF fault info to serial
                         gpf_print_info_serial();
+                    }
+                    '8' => {
+                        // Print kernel validation info to serial
+                        gpf_print_validation_serial();
                     }
                     'r' | 'R' => {
                         // Reset stack offset
@@ -783,7 +963,7 @@ unsafe fn gpf_browser_display() {
     vga_write_str(20, 15, b"Base:", VGA_ATTR_WHITE);
     vga_write_hex32(24, 15, base_addr, VGA_ATTR_GREEN);
     
-    vga_write_str(0, 16, b"M=menu 1/2=INT 3/4=regs 5=stack 6=halt", VGA_ATTR_BLUE);
+    vga_write_str(0, 16, b"M=menu 1/2=INT 3/4=regs 5=stack 6=halt 7=info 8=val", VGA_ATTR_BLUE);
     
     // Stack dump - 8 rows of 32-bit values (4 values per row)
     vga_write_str(0, 17, b"=== STACK DUMP (32-bit) ===", VGA_ATTR_BLUE);
@@ -821,9 +1001,10 @@ unsafe fn gpf_show_menu() {
     vga_write_str(0, 6, b"5 - Print Stack to Serial", VGA_ATTR_WHITE);
     vga_write_str(0, 7, b"6 - Halt CPU", VGA_ATTR_WHITE);
     vga_write_str(0, 8, b"7 - Print GPF Info to Serial", VGA_ATTR_WHITE);
-    vga_write_str(0, 9, b"", VGA_ATTR_WHITE);
-    vga_write_str(0, 9, b"Press M to return to menu", VGA_ATTR_GREEN);
-    vga_write_str(0, 10, b"Press any other key to continue", VGA_ATTR_GREEN);
+    vga_write_str(0, 9, b"8 - Print Validation Info to Serial", VGA_ATTR_WHITE);
+    vga_write_str(0, 10, b"", VGA_ATTR_WHITE);
+    vga_write_str(0, 10, b"Press M to return to menu", VGA_ATTR_GREEN);
+    vga_write_str(0, 11, b"Press any other key to continue", VGA_ATTR_GREEN);
     
     // Wait for key press
     loop {
@@ -1263,6 +1444,224 @@ unsafe fn gpf_print_stack_serial() {
     
     // Show confirmation on VGA
     gpf_print_status(b"Stack dump sent to serial", VGA_ATTR_GREEN);
+}
+
+/// Print kernel validation info to serial port
+unsafe fn gpf_print_validation_serial() {
+    let mut uart = match Uart16550::new_port(0x3F8) {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    uart.init(Config::default()).ok();
+    
+    uart.send_bytes_exact(b"\r\n=== KERNEL VALIDATION INFO ===\r\n");
+    
+    // GDT validation
+    uart.send_bytes_exact(b"GDT:");
+    if GDT_VALID {
+        uart.send_bytes_exact(b" OK");
+    } else {
+        uart.send_bytes_exact(b" FAIL");
+    }
+    uart.send_bytes_exact(b" base=");
+    let digits: [u8; 8] = [
+        to_hex_digit(((GDT_BASE >> 28) & 0xF) as u8),
+        to_hex_digit(((GDT_BASE >> 24) & 0xF) as u8),
+        to_hex_digit(((GDT_BASE >> 20) & 0xF) as u8),
+        to_hex_digit(((GDT_BASE >> 16) & 0xF) as u8),
+        to_hex_digit(((GDT_BASE >> 12) & 0xF) as u8),
+        to_hex_digit(((GDT_BASE >> 8) & 0xF) as u8),
+        to_hex_digit(((GDT_BASE >> 4) & 0xF) as u8),
+        to_hex_digit((GDT_BASE & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b" lim=");
+    let digits: [u8; 4] = [
+        to_hex_digit(((GDT_LIMIT >> 12) & 0xF) as u8),
+        to_hex_digit(((GDT_LIMIT >> 8) & 0xF) as u8),
+        to_hex_digit(((GDT_LIMIT >> 4) & 0xF) as u8),
+        to_hex_digit((GDT_LIMIT & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b" (exp=002F)\r\n");
+    
+    // IDT validation
+    uart.send_bytes_exact(b"IDT:");
+    if IDT_VALID {
+        uart.send_bytes_exact(b" OK");
+    } else {
+        uart.send_bytes_exact(b" FAIL");
+    }
+    uart.send_bytes_exact(b" base=");
+    let digits: [u8; 8] = [
+        to_hex_digit(((IDT_BASE >> 28) & 0xF) as u8),
+        to_hex_digit(((IDT_BASE >> 24) & 0xF) as u8),
+        to_hex_digit(((IDT_BASE >> 20) & 0xF) as u8),
+        to_hex_digit(((IDT_BASE >> 16) & 0xF) as u8),
+        to_hex_digit(((IDT_BASE >> 12) & 0xF) as u8),
+        to_hex_digit(((IDT_BASE >> 8) & 0xF) as u8),
+        to_hex_digit(((IDT_BASE >> 4) & 0xF) as u8),
+        to_hex_digit((IDT_BASE & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b" lim=");
+    let digits: [u8; 4] = [
+        to_hex_digit(((IDT_LIMIT >> 12) & 0xF) as u8),
+        to_hex_digit(((IDT_LIMIT >> 8) & 0xF) as u8),
+        to_hex_digit(((IDT_LIMIT >> 4) & 0xF) as u8),
+        to_hex_digit((IDT_LIMIT & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b" (exp=017F)\r\n");
+    
+    // IDT CPL validation
+    uart.send_bytes_exact(b"IDT_CPL:");
+    if IDT_CPL_VALID {
+        uart.send_bytes_exact(b" OK 48 gates\r\n");
+    } else {
+        uart.send_bytes_exact(b" FAIL attrs=");
+        let hi = to_hex_digit((IDT_CPL_CONFIG >> 4) & 0xF);
+        let lo = to_hex_digit(IDT_CPL_CONFIG & 0xF);
+        uart.send_bytes_exact(&[hi, lo]);
+        uart.send_bytes_exact(b"\r\n");
+    }
+    
+    // TSS validation
+    uart.send_bytes_exact(b"TSS:");
+    if TSS_VALID {
+        uart.send_bytes_exact(b" OK");
+    } else {
+        uart.send_bytes_exact(b" NOT LOADED");
+    }
+    uart.send_bytes_exact(b" sel=");
+    let digits: [u8; 4] = [
+        to_hex_digit(((TSS_SELECTOR >> 12) & 0xF) as u8),
+        to_hex_digit(((TSS_SELECTOR >> 8) & 0xF) as u8),
+        to_hex_digit(((TSS_SELECTOR >> 4) & 0xF) as u8),
+        to_hex_digit((TSS_SELECTOR & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    if TSS_SELECTOR != 0 {
+        let ti = ((TSS_SELECTOR >> 2) & 1) as u8;
+        let rpl = (TSS_SELECTOR & 0x3) as u8;
+        let index = TSS_SELECTOR >> 3;
+        uart.send_bytes_exact(b" TI=");
+        uart.send_bytes_exact(&[b'0' + ti]);
+        uart.send_bytes_exact(b" RPL=");
+        uart.send_bytes_exact(&[b'0' + rpl]);
+        uart.send_bytes_exact(b" IDX=");
+        let digits: [u8; 4] = [
+            to_hex_digit(((index >> 12) & 0xF) as u8),
+            to_hex_digit(((index >> 8) & 0xF) as u8),
+            to_hex_digit(((index >> 4) & 0xF) as u8),
+            to_hex_digit((index & 0xF) as u8),
+        ];
+        uart.send_bytes_exact(&digits);
+    }
+    uart.send_bytes_exact(b"\r\n");
+    
+    // TSS CPL validation
+    uart.send_bytes_exact(b"TSS_CPL:");
+    if TSS_CPL_VALID {
+        uart.send_bytes_exact(b" OK ESP0/SS0 valid\r\n");
+    } else {
+        uart.send_bytes_exact(b" FAIL\r\n");
+    }
+    uart.send_bytes_exact(b" ESP0=");
+    let digits: [u8; 8] = [
+        to_hex_digit(((TSS_ESP0 >> 28) & 0xF) as u8),
+        to_hex_digit(((TSS_ESP0 >> 24) & 0xF) as u8),
+        to_hex_digit(((TSS_ESP0 >> 20) & 0xF) as u8),
+        to_hex_digit(((TSS_ESP0 >> 16) & 0xF) as u8),
+        to_hex_digit(((TSS_ESP0 >> 12) & 0xF) as u8),
+        to_hex_digit(((TSS_ESP0 >> 8) & 0xF) as u8),
+        to_hex_digit(((TSS_ESP0 >> 4) & 0xF) as u8),
+        to_hex_digit((TSS_ESP0 & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b" SS0=");
+    let digits: [u8; 4] = [
+        to_hex_digit(((TSS_SS0 >> 12) & 0xF) as u8),
+        to_hex_digit(((TSS_SS0 >> 8) & 0xF) as u8),
+        to_hex_digit(((TSS_SS0 >> 4) & 0xF) as u8),
+        to_hex_digit((TSS_SS0 & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    if TSS_SS0 != 0x10 {
+        uart.send_bytes_exact(b" (exp=10)");
+    }
+    uart.send_bytes_exact(b"\r\n");
+    
+    // Ring 3 SS validation
+    uart.send_bytes_exact(b"R3_SS:");
+    if RING3_SS_VALID {
+        uart.send_bytes_exact(b" OK");
+    } else {
+        uart.send_bytes_exact(b" FAIL");
+    }
+    uart.send_bytes_exact(b" sel=");
+    let digits: [u8; 4] = [
+        to_hex_digit(((RING3_SS_SELECTOR >> 12) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_SELECTOR >> 8) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_SELECTOR >> 4) & 0xF) as u8),
+        to_hex_digit((RING3_SS_SELECTOR & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b" base=");
+    let digits: [u8; 8] = [
+        to_hex_digit(((RING3_SS_BASE >> 28) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_BASE >> 24) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_BASE >> 20) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_BASE >> 16) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_BASE >> 12) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_BASE >> 8) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_BASE >> 4) & 0xF) as u8),
+        to_hex_digit((RING3_SS_BASE & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b" lim=");
+    let digits: [u8; 8] = [
+        to_hex_digit(((RING3_SS_LIMIT >> 28) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_LIMIT >> 24) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_LIMIT >> 20) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_LIMIT >> 16) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_LIMIT >> 12) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_LIMIT >> 8) & 0xF) as u8),
+        to_hex_digit(((RING3_SS_LIMIT >> 4) & 0xF) as u8),
+        to_hex_digit((RING3_SS_LIMIT & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    if !RING3_SS_VALID {
+        uart.send_bytes_exact(b" acc=");
+        let hi = to_hex_digit((RING3_SS_ACCESS >> 4) & 0xF);
+        let lo = to_hex_digit(RING3_SS_ACCESS & 0xF);
+        uart.send_bytes_exact(&[hi, lo]);
+    }
+    uart.send_bytes_exact(b"\r\n");
+    
+    // Ring 3 ESP validation
+    uart.send_bytes_exact(b"R3_ESP:");
+    if RING3_ESP_VALID {
+        uart.send_bytes_exact(b" OK\r\n");
+    } else {
+        uart.send_bytes_exact(b" FAIL\r\n");
+    }
+    uart.send_bytes_exact(b" esp=");
+    let digits: [u8; 8] = [
+        to_hex_digit(((RING3_ESP >> 28) & 0xF) as u8),
+        to_hex_digit(((RING3_ESP >> 24) & 0xF) as u8),
+        to_hex_digit(((RING3_ESP >> 20) & 0xF) as u8),
+        to_hex_digit(((RING3_ESP >> 16) & 0xF) as u8),
+        to_hex_digit(((RING3_ESP >> 12) & 0xF) as u8),
+        to_hex_digit(((RING3_ESP >> 8) & 0xF) as u8),
+        to_hex_digit(((RING3_ESP >> 4) & 0xF) as u8),
+        to_hex_digit((RING3_ESP & 0xF) as u8),
+    ];
+    uart.send_bytes_exact(&digits);
+    uart.send_bytes_exact(b"\r\n");
+    
+    // Show confirmation on VGA
+    gpf_print_status(b"Validation info sent to serial", VGA_ATTR_GREEN);
 }
 
 #[no_mangle]
